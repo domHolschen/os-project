@@ -6,7 +6,7 @@
 #include<string>
 using namespace std;
 
-/* Function to verify whether the argument is not null and numeric */
+/* Function to verify whether the argument is not null, numeric, and at least 1 */
 bool isValidArgument(const char* arg) {
 	if (arg == NULL || *arg == '\0') {
 		return false;
@@ -39,15 +39,11 @@ int main(int argc, char** argv) {
 		printf("USER: Invalid or missing argument, defaulting to 1\n");
 	}
 
-	char* beforeSleepString = "before sleeping";
-	char* afterSleepString = "after sleeping";
-
 	for (int i = 1; i <= iterations; i++) {
-		printProcessDetails(i, beforeSleepString);
+		printProcessDetails(i, "before sleeping");
 		sleep(1);
-		printProcessDetails(i, afterSleepString);
+		printProcessDetails(i, "after sleeping");
 	}
-		
-	printf("USER ending\n");
+
 	return EXIT_SUCCESS;
 }
