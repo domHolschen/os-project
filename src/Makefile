@@ -1,0 +1,24 @@
+CC	= g++ -g3
+CFLAGS  = -g3
+TARGET1 = child
+TARGET2 = parent 
+
+OBJS1	= child.o
+OBJS2	= parent.o
+
+all:	$(TARGET1) $(TARGET2)
+
+$(TARGET1):	$(OBJS1)
+	$(CC) -o $(TARGET1) $(OBJS1)
+
+$(TARGET2):	$(OBJS2)
+	$(CC) -o $(TARGET2) $(OBJS2)
+
+child.o:	child.cpp
+	$(CC) $(CFLAGS) -c child.cpp 
+
+parent.o:	parent.cpp
+	$(CC) $(CFLAGS) -c parent.cpp
+
+clean:
+	/bin/rm -f *.o $(TARGET1) $(TARGET2)
