@@ -8,8 +8,8 @@ using namespace std;
 int main(int argc, char** argv) {
 	pid_t childPid = fork();
 		if (childPid == 0) {
-			printf("I am a child but a copy of parent! My parent's PID is %d, and my PID is % d\n", getppid(), getpid());
-			string arg0 = "./child";
+			printf("I am OSS but a copy of parent! My parent's PID is %d, and my PID is % d\n", getppid(), getpid());
+			string arg0 = "./user";
 			string arg1 = "Hello";
 			string arg2 = "there";
 			string arg3 = "exec";
