@@ -1,4 +1,5 @@
 os-project by Dominic Holschen
+See the repo on github: https://github.com/domHolschen/os-project
 
 To Compile:
 Use the `make` command to invoke the Makefile and create the executables `user` and `oss`.
