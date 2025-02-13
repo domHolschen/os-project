@@ -14,6 +14,12 @@ void printHelp() {
 	printf("-t : Amount of iterations each child process will run through before terminating (default: 1)\n");
 }
 
+/* Takes in optarg and returns int. Defaults to 1 if out of bounds */
+int processOptarg(const char* optarg) {
+	int argAsInt = atoi(optarg);
+	return argAsInt >= 1 ? argAsInt : 1;
+}
+
 int main(int argc, char** argv) {
 	const char optstr[] = "hn:s:t:";
 	char opt;
@@ -31,23 +37,26 @@ int main(int argc, char** argv) {
 				printHelp();
 				return EXIT_SUCCESS;
 			case 'n':
-				processesAmount = atoi(optarg);
+				processesAmount = processOptarg(optarg);
 				break;
 			case 's':
-				simultaneousLimitEnabled = true;
-				maxSimultaneousProcesses = atoi(optarg);
+				maxSimultaneousProcesses = processOptarg(optarg);
 				break;
 			case 't':
-				iterationsAmount = atoi(optarg);
+				iterationsAmount = processOptarg(optarg);
 				break;
 		}
 	}
 
+	if (maxSimultaneousProcesses < processesAmount) {
+		simultaneousLimitEnabled = true;
+	}
+
 	int instancesToWaitFor = 0;
-	int totalInstancesLaunched = 0;
-	while (totalInstancesLaunched < processesAmount) {
+	int totalInstancesToLaunch = processesAmount;
+	while (totalInstancesToLaunch > 0) {
 		instancesToWaitFor++;
-		totalInstancesLaunched++;
+		totalInstancesToLaunch--;
 		pid_t childPid = fork();
 
 		/* Child process - launches user */
@@ -59,7 +68,8 @@ int main(int argc, char** argv) {
 			exit(1);
 			/* Parent process - waits for children to terminate */
 		} else {
-			if (instancesToWaitFor >= processesAmount) {
+			bool shouldWait = totalInstancesToLaunch == 0 || (simultaneousLimitEnabled && instancesToWaitFor >= maxSimultaneousProcesses);
+			if (shouldWait) {
 				for (int i = 0; i < instancesToWaitFor; i++) {
 					wait(0);
 				}
@@ -68,6 +78,6 @@ int main(int argc, char** argv) {
 		}
 	}
 
-	printf("oss is now ending.\n");
+	printf("OSS: ending\n");
 	return EXIT_SUCCESS;
 }
