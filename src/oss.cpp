@@ -78,6 +78,5 @@ int main(int argc, char** argv) {
 		}
 	}
 
-	printf("OSS: ending\n");
 	return EXIT_SUCCESS;
 }
