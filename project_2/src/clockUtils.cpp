@@ -1,7 +1,8 @@
 #include "clockUtils.h"
+#include <cstdio>
 
 /* Takes in seconds + nano by reference and increments them based 3rd and 4th parameters*/
-void CLOCKUTILS_H::addToClock(int& seconds, int& nano, int secondsToAdd, int nanoToAdd) {
+void addToClock(int& seconds, int& nano, int secondsToAdd, int nanoToAdd) {
 	const int ONE_BILLION = 1000000000;
 
 	seconds += secondsToAdd;
@@ -18,7 +19,7 @@ void CLOCKUTILS_H::addToClock(int& seconds, int& nano, int secondsToAdd, int nan
 }
 
 /* Compares times to see if the current time has passed the specified end time */
-bool CLOCKUTILS_H::hasTimePassed(int currentSeconds, int currentNano, int endSeconds, int endNano) {
+bool hasTimePassed(int currentSeconds, int currentNano, int endSeconds, int endNano) {
 	if (currentSeconds == endSeconds) {
 		return currentNano >= endNano;
 	}

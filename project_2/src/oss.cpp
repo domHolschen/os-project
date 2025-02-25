@@ -4,27 +4,32 @@
 #include<stdlib.h>
 #include<sys/wait.h>
 #include<string>
+#include<sys/ipc.h>
+#include<sys/shm.h>
+#include<signal.h>
 #include "clockUtils.h"
 using namespace std;
 
-#define SHMKEY 9021090210
+#define SHMKEY 9021011
 #define BUFFER_SIZE sizeof(int) * 2
-
 const int PROCESS_TABLE_MAX_SIZE = 20;
+const int ONE_BILLION = 1000000000;
+
 struct PCB {
-	int occupied; // either true or false
+	bool occupied; // either true or false
 	pid_t pid; // process id of this child
 	int startSeconds; // time when it was forked
 	int startNano; // time when it was forked
 };
-
-const int ONE_BILLION = 1000000000;
+struct PCB processTable[PROCESS_TABLE_MAX_SIZE];
+int sharedMemoryId;
+int* sharedClock;
 
 void printHelp() {
 	printf("Usage: oss [-h] [-n proc] [-s simul] [-t iter]\n");
 	printf("-h : Print options for the oss tool and exits\n");
 	printf("-n : Total number of processes to run (default: 1)\n");
-	printf("-s : Maximum number of simultaneously running processes (disabled by default)\n");
+	printf("-s : Maximum number of simultaneously running processes. Maximum of %d (default: %d)\n", PROCESS_TABLE_MAX_SIZE, PROCESS_TABLE_MAX_SIZE);
 	printf("-t : Maximum number of seconds that workers will run (default: 1)\n");
 }
 
@@ -35,13 +40,37 @@ int processOptarg(const char* optarg) {
 }
 
 /* Helper function for finding an unoccupied slot in the process table array. Returns -1 if all are occupied */
-int findUnoccupiedProcessTableIndex(PCB* processTable) {
+int findUnoccupiedProcessTableIndex() {
 	for (int i = 0; i < PROCESS_TABLE_MAX_SIZE; i++) {
 		if (!processTable[i].occupied) {
 			return i;
 		}
 	}
 	return -1;
+}
+
+/* Helper function for finding an entry in the process table with a specific PID and remove it */
+void removePidFromProcessTable(pid_t pid) {
+	/* TODO */
+}
+
+
+/* Detaches pointer and clears shared memory at the key */
+void cleanUpSharedMemory() {
+	shmdt(sharedClock);
+	shmctl(SHMKEY, IPC_RMID, NULL);
+}
+
+/* Kills child processes and clears shared memory */
+void handleFailsafeSignal(int signal) {
+	for (int i = 0; i < PROCESS_TABLE_MAX_SIZE; i++) {
+		if (processTable[i].occupied) {
+			kill(processTable[i].pid, SIGTERM);
+		}
+	}
+	cleanUpSharedMemory();
+
+	exit(1);
 }
 
 int main(int argc, char** argv) {
@@ -51,7 +80,6 @@ int main(int argc, char** argv) {
 	/* Default parameters */
 	int processesAmount = 1;
 	int maxSimultaneousProcesses = 1;
-	bool simultaneousLimitEnabled = false;
 	int maxSeconds = 1;
 
 	/* Process options */
@@ -65,6 +93,9 @@ int main(int argc, char** argv) {
 				break;
 			case 's':
 				maxSimultaneousProcesses = processOptarg(optarg);
+				if (maxSimultaneousProcesses > PROCESS_TABLE_MAX_SIZE) {
+					maxSimultaneousProcesses = PROCESS_TABLE_MAX_SIZE;
+				}
 				break;
 			case 't':
 				maxSeconds = processOptarg(optarg);
@@ -73,29 +104,38 @@ int main(int argc, char** argv) {
 	}
 
 	/* Set up process table */
-	struct PCB processTable[PROCESS_TABLE_MAX_SIZE];
 	PCB emptyPcb = { false, 0, 0, 0 };
 	for (int i = 0; i < PROCESS_TABLE_MAX_SIZE; i++) {
 		processTable[i] = emptyPcb;
 	}
 
-	int simClockSeconds = 0;
-	int simClockNano = 0;
-
-	if (maxSimultaneousProcesses < processesAmount) {
-		simultaneousLimitEnabled = true;
+	/* Set up shared memory & attach */
+	sharedMemoryId = shmget(SHMKEY, BUFFER_SIZE, 0777 | IPC_CREAT);
+	if (sharedMemoryId == -1) {
+		fprintf(stderr, "OSS: Error defining shared memory");
+		exit(1);
 	}
+	sharedClock = (int*)(shmat(sharedMemoryId, 0, 0));
 
-	int instancesToWaitFor = 0;
-	int totalInstancesToLaunch = processesAmount;
+	/* Simulated clock: seconds */
+	sharedClock[0] = 0;
+	/* Simulated clock: nanoseconds */
+	sharedClock[1] = 0;
 
-	/* Keeps track of the half-second intervals where OSS will print the PCB table*/
+	/* Keeps track of the half-second intervals where OSS will print the PCB table */
 	int pcbTimerSeconds = 0;
 	int pcbTimerNano = ONE_BILLION / 2;
+
+	/* Set up failsafe that kills the program and its children after 60 seconds */
+	signal(SIGALRM, handleFailsafeSignal);
+	alarm(60);
+
+	int instancesRunning = 0;
+	int totalInstancesToLaunch = processesAmount;
 	while (totalInstancesToLaunch > 0) {
 		/* Printing PCB table*/
-		if (ClockUtils::hasTimePassed(simClockSeconds, simClockNano, pcbTimerSeconds, pcbTimerNano)) {
-			ClockUtils::addToClock(pcbTimerSeconds, pcbTimerNano, 0, ONE_BILLION / 2);
+		if (hasTimePassed(sharedClock[0], sharedClock[1], pcbTimerSeconds, pcbTimerNano)) {
+			addToClock(pcbTimerSeconds, pcbTimerNano, 0, ONE_BILLION / 2);
 			printf("Entry\tOccupied?\tPID\tStart(s)\tStart(ns)");
 			for (int i = 0; i < PROCESS_TABLE_MAX_SIZE; i++) {
 				int entry = i;
@@ -103,11 +143,11 @@ int main(int argc, char** argv) {
 				printf("%d\t%s\t%d\t%d\t%d", entry, isOccupied, processTable[i].pid, processTable[i].startSeconds, processTable[i].startNano);
 			}
 		}
-		instancesToWaitFor++;
+		instancesRunning++;
 		totalInstancesToLaunch--;
 		pid_t childPid = fork();
 
-		/* Child process - launches user */
+		/* Child process - launches worker */
 		if (childPid == 0) {
 			string arg0 = "./worker";
 			string arg1 = to_string(rand() % maxSeconds);
@@ -117,18 +157,18 @@ int main(int argc, char** argv) {
 			exit(1);
 			/* Parent process - waits for children to terminate */
 		} else {
-			bool shouldWait = totalInstancesToLaunch == 0 || (simultaneousLimitEnabled && instancesToWaitFor >= maxSimultaneousProcesses);
-			if (shouldWait) {
-				for (int i = 0; i < instancesToWaitFor; i++) {
-					wait(0);
-				}
-				instancesToWaitFor = 0;
+
+			int pid = waitpid(-1, &status, WNOHANG);
+			if (pid != 0) {
+				instancesRunning--;
 			}
+
+			/* 100 million nanoseconds */
+			const int NANO_SECONDS_TO_ADD_EACH_LOOP = ONE_BILLION / 10;
+			addToClock(sharedClock[0], sharedClock[1], 0, NANO_SECONDS_TO_ADD_EACH_LOOP);
 		}
-		/* 100 million nanoseconds */
-		const int NANO_SECONDS_TO_ADD_EACH_LOOP = 100000000;
-		ClockUtils::addToClock(simClockSeconds, simClockNano, 0, NANO_SECONDS_TO_ADD_EACH_LOOP);
 	}
 
+	cleanUpSharedMemory();
 	return EXIT_SUCCESS;
 }
