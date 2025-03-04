@@ -70,6 +70,8 @@ void cleanUpSharedMemory() {
 
 /* Kills child processes and clears shared memory */
 void handleFailsafeSignal(int signal) {
+	printf("OSS: Failsafe signal captured, terminating...\n");
+
 	for (int i = 0; i < PROCESS_TABLE_MAX_SIZE; i++) {
 		if (processTable[i].occupied) {
 			kill(processTable[i].pid, SIGTERM);
