@@ -21,7 +21,7 @@ void addToClock(int& seconds, int& nano, int secondsToAdd, int nanoToAdd) {
 /* Compares times to see if the current time has passed the specified end time */
 bool hasTimePassed(int currentSeconds, int currentNano, int endSeconds, int endNano) {
 	if (currentSeconds == endSeconds) {
-		return currentNano >= endNano;
+		return currentNano > endNano;
 	}
 	return currentSeconds > endSeconds;
 }

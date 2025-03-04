@@ -31,6 +31,7 @@ void printHelp() {
 	printf("-n : Total number of processes to run (default: 1)\n");
 	printf("-s : Maximum number of simultaneously running processes. Maximum of %d (default: %d)\n", PROCESS_TABLE_MAX_SIZE, PROCESS_TABLE_MAX_SIZE);
 	printf("-t : Maximum number of seconds that workers will run (default: 1)\n");
+	printf("-i : Interval (in ms) to launch child processes (default: 0)\n");
 }
 
 /* Takes in optarg and returns int. Defaults to 1 if out of bounds */
@@ -51,7 +52,13 @@ int findUnoccupiedProcessTableIndex() {
 
 /* Helper function for finding an entry in the process table with a specific PID and remove it */
 void removePidFromProcessTable(pid_t pid) {
-	/* TODO */
+	for (int i = 0; i < PROCESS_TABLE_MAX_SIZE; i++) {
+		if (processTable[i].pid == pid && processTable[i].occupied) {
+			kill(processTable[i].pid, SIGTERM);
+			processTable[i].occupied = false;
+			return;
+		}
+	}
 }
 
 
@@ -74,13 +81,15 @@ void handleFailsafeSignal(int signal) {
 }
 
 int main(int argc, char** argv) {
-	const char optstr[] = "hn:s:t:";
+	const char optstr[] = "hn:s:t:i:";
 	char opt;
 
 	/* Default parameters */
 	int processesAmount = 1;
-	int maxSimultaneousProcesses = 1;
+	int maxSimultaneousProcesses = PROCESS_TABLE_MAX_SIZE;
 	int maxSeconds = 1;
+	int forkIntervalMs = 0;
+	bool forkIntervalEnabled = false;
 
 	/* Process options */
 	while ((opt = getopt(argc, argv, optstr)) != -1) {
@@ -99,6 +108,10 @@ int main(int argc, char** argv) {
 				break;
 			case 't':
 				maxSeconds = processOptarg(optarg);
+				break;
+			case 'i':
+				forkIntervalMs = processOptarg(optarg);
+				forkIntervalEnabled = true;
 				break;
 		}
 	}
@@ -126,26 +139,50 @@ int main(int argc, char** argv) {
 	int pcbTimerSeconds = 0;
 	int pcbTimerNano = ONE_BILLION / 2;
 
+	/* Keeps track of the interval it can create new instances */
+	int readyToForkSeconds = 0;
+	int readyToForkNano = 0;
+
+	/* Interval converted to our clock's units */
+	int intervalSeconds = forkIntervalMs / 1000;
+	int intervalNano = (forkIntervalMs % 1000) * 1000000;
+
 	/* Set up failsafe that kills the program and its children after 60 seconds */
 	signal(SIGALRM, handleFailsafeSignal);
 	alarm(60);
 
 	int instancesRunning = 0;
 	int totalInstancesToLaunch = processesAmount;
-	while (totalInstancesToLaunch > 0) {
+	while (totalInstancesToLaunch > 0 || instancesRunning > 0) {
 		/* Printing PCB table*/
 		if (hasTimePassed(sharedClock[0], sharedClock[1], pcbTimerSeconds, pcbTimerNano)) {
 			addToClock(pcbTimerSeconds, pcbTimerNano, 0, ONE_BILLION / 2);
-			printf("Entry\tOccupied?\tPID\tStart(s)\tStart(ns)");
+			printf("Entry\tOccupied?\tPID\tStart(s)\tStart(ns)\n");
 			for (int i = 0; i < PROCESS_TABLE_MAX_SIZE; i++) {
 				int entry = i;
-				string isOccupied = processTable[i].occupied ? "true" : "false";
-				printf("%d\t%s\t%d\t%d\t%d", entry, isOccupied, processTable[i].pid, processTable[i].startSeconds, processTable[i].startNano);
+				const char* isOccupied = processTable[i].occupied ? "true" : "false";
+				printf("%d\t%s\t\t%d\t%d\t\t%d\n", entry, isOccupied, processTable[i].pid, processTable[i].startSeconds, processTable[i].startNano);
 			}
 		}
-		instancesRunning++;
-		totalInstancesToLaunch--;
-		pid_t childPid = fork();
+		
+		pid_t childPid;
+		bool shouldAddToProcessTable = false;
+		bool shouldFork = totalInstancesToLaunch > 0 && instancesRunning < maxSimultaneousProcesses;
+		bool readyToFork = !forkIntervalEnabled || hasTimePassed(sharedClock[0], sharedClock[1], readyToForkSeconds, readyToForkNano);
+		if (shouldFork && readyToFork) {
+			/* Creating child */
+			totalInstancesToLaunch--;
+			instancesRunning++;
+			shouldAddToProcessTable = true;
+
+			if (forkIntervalEnabled) {
+				readyToForkSeconds = sharedClock[0];
+				readyToForkNano = sharedClock[1];
+				addToClock(readyToForkSeconds, readyToForkNano, intervalSeconds, intervalNano);
+			}
+
+			childPid = fork();
+		}
 
 		/* Child process - launches worker */
 		if (childPid == 0) {
@@ -153,18 +190,28 @@ int main(int argc, char** argv) {
 			string arg1 = to_string(rand() % maxSeconds);
 			string arg2 = to_string(rand() % ONE_BILLION);
 			execlp(arg0.c_str(), arg0.c_str(), arg1.c_str(), arg2.c_str(), (char*)0);
-			fprintf(stderr, "Launching user failed, terminating\n");
+			fprintf(stderr, "OSS: Launching worker failed, terminating\n");
 			exit(1);
 			/* Parent process - waits for children to terminate */
 		} else {
+			if (shouldAddToProcessTable) {
+				int index = findUnoccupiedProcessTableIndex();
+				if (index == -1) {
+					fprintf(stderr, "OSS: No unoccupied entry in process table found. Continuing child execution\n");
+				}
+				PCB newPcb = { true, childPid, sharedClock[0], sharedClock[1] };
+				processTable[index] = newPcb;
+			}
 
+			int status;
 			int pid = waitpid(-1, &status, WNOHANG);
+
 			if (pid != 0) {
+				removePidFromProcessTable(pid);
 				instancesRunning--;
 			}
 
-			/* 100 million nanoseconds */
-			const int NANO_SECONDS_TO_ADD_EACH_LOOP = ONE_BILLION / 10;
+			const int NANO_SECONDS_TO_ADD_EACH_LOOP = ONE_BILLION / 800000;
 			addToClock(sharedClock[0], sharedClock[1], 0, NANO_SECONDS_TO_ADD_EACH_LOOP);
 		}
 	}
