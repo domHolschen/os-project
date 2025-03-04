@@ -156,17 +156,6 @@ int main(int argc, char** argv) {
 	int instancesRunning = 0;
 	int totalInstancesToLaunch = processesAmount;
 	while (totalInstancesToLaunch > 0 || instancesRunning > 0) {
-		/* Printing PCB table*/
-		if (hasTimePassed(sharedClock[0], sharedClock[1], pcbTimerSeconds, pcbTimerNano)) {
-			addToClock(pcbTimerSeconds, pcbTimerNano, 0, ONE_BILLION / 2);
-			printf("Entry\tOccupied?\tPID\tStart(s)\tStart(ns)\n");
-			for (int i = 0; i < PROCESS_TABLE_MAX_SIZE; i++) {
-				int entry = i;
-				const char* isOccupied = processTable[i].occupied ? "true" : "false";
-				printf("%d\t%s\t\t%d\t%d\t\t%d\n", entry, isOccupied, processTable[i].pid, processTable[i].startSeconds, processTable[i].startNano);
-			}
-		}
-		
 		pid_t childPid;
 		bool shouldAddToProcessTable = false;
 		bool shouldFork = totalInstancesToLaunch > 0 && instancesRunning < maxSimultaneousProcesses;
@@ -203,6 +192,17 @@ int main(int argc, char** argv) {
 				}
 				PCB newPcb = { true, childPid, sharedClock[0], sharedClock[1] };
 				processTable[index] = newPcb;
+			}
+
+			/* Printing PCB table*/
+			if (hasTimePassed(sharedClock[0], sharedClock[1], pcbTimerSeconds, pcbTimerNano)) {
+				addToClock(pcbTimerSeconds, pcbTimerNano, 0, ONE_BILLION / 2);
+				printf("Entry\tOccupied?\tPID\tStart(s)\tStart(ns)\n");
+				for (int i = 0; i < PROCESS_TABLE_MAX_SIZE; i++) {
+					int entry = i;
+					const char* isOccupied = processTable[i].occupied ? "true" : "false";
+					printf("%d\t%s\t\t%d\t%d\t\t%d\n", entry, isOccupied, processTable[i].pid, processTable[i].startSeconds, processTable[i].startNano);
+				}
 			}
 
 			int status;
