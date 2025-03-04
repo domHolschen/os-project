@@ -65,7 +65,7 @@ void removePidFromProcessTable(pid_t pid) {
 /* Detaches pointer and clears shared memory at the key */
 void cleanUpSharedMemory() {
 	shmdt(sharedClock);
-	shmctl(SHMKEY, IPC_RMID, NULL);
+	shmctl(sharedMemoryId, IPC_RMID, NULL);
 }
 
 /* Kills child processes and clears shared memory */
@@ -216,7 +216,7 @@ int main(int argc, char** argv) {
 		}
 	}
 
-	printf("OSS: Created all children and all children terminated, terminating...");
+	printf("OSS: Created all children and all children terminated, terminating...\n");
 	cleanUpSharedMemory();
 	return EXIT_SUCCESS;
 }
