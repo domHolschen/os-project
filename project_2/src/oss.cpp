@@ -55,7 +55,7 @@ void removePidFromProcessTable(pid_t pid) {
 	for (int i = 0; i < PROCESS_TABLE_MAX_SIZE; i++) {
 		if (processTable[i].pid == pid && processTable[i].occupied) {
 			kill(processTable[i].pid, SIGTERM);
-			processTable[i].occupied = false;
+			processTable[i] = { false, 0, 0, 0 };
 			return;
 		}
 	}
@@ -216,6 +216,7 @@ int main(int argc, char** argv) {
 		}
 	}
 
+	printf("OSS: Created all children and all children terminated, terminating...");
 	cleanUpSharedMemory();
 	return EXIT_SUCCESS;
 }
