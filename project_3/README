@@ -1,0 +1,28 @@
+os-project by Dominic Holschen
+Project 2
+See the repo on github: https://github.com/domHolschen/os-project, folder project_2
+
+To Compile:
+Use the `make` command to invoke the Makefile and create the executables `worker` and `oss`.
+The `clockUtils` files are library code created for the executables that get compiled into them when `make` is executed.
+
+These tools use a simulated clock so times displayed may not be accurate to realtime.
+
+worker:
+Tool that intakes 2 arguments. That argument is the amount of time the worker will run for.
+The first argument being the amount of seconds and the second being the amount of nanoseconds.
+The arguments are integers and have a minumum value of 1. Invalid inputs will be defaulted to 1.
+
+oss:
+Tool with 5 different options. It invokes `worker` processes and continues until all instances are created and finished.
+Usage: oss [-h] [-n proc] [-s simul] [-t time] [-i interv]
+-h : Print options for the oss tool and exits
+-n : Total number of processes to run (default: 1)
+-s : Maximum number of simultaneously running processes. Maximum of 20 (defaults to max value)
+-t : Workers are executed with a random amount of time, this defines the maximum number of seconds that workers will run (default: 1)
+-i : Interval (in ms) to launch child processes (default: 0)
+Every half second it prints the process table of its children.
+After 60 real-life seconds (not using the simulated clock) it will shut down as a failsafe.
+
+Known issues:
+The workers will often print their status in the middle of when the parent prints the process table.
