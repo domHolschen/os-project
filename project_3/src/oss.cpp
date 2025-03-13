@@ -7,6 +7,8 @@
 #include<sys/ipc.h>
 #include<sys/shm.h>
 #include<signal.h>
+#include<cstdlib>
+#include<sys/msg.h>
 #include "clockUtils.h"
 using namespace std;
 
@@ -22,6 +24,10 @@ struct PCB {
 	int startNano; // time when it was forked
 };
 struct PCB processTable[PROCESS_TABLE_MAX_SIZE];
+struct MessageBuffer {
+	long messageType;
+	int value;
+};
 int sharedMemoryId;
 int* sharedClock;
 
@@ -61,6 +67,16 @@ void removePidFromProcessTable(pid_t pid) {
 	}
 }
 
+/* Finds the next running process in the process table. If it loops past the end of the array, it resets to 0. Returns -1 if all are unoccupied */
+int findNextProcessInTable(int currentIndex) {
+	for (int i = 0; i < PROCESS_TABLE_MAX_SIZE; i++) {
+		int indexToCheck = (i + currentIndex) % PROCESS_TABLE_MAX_SIZE;
+		if (processTable[indexToCheck].occupied) {
+			return indexToCheck;
+		}
+	}
+	return -1;
+}
 
 /* Detaches pointer and clears shared memory at the key */
 void cleanUpSharedMemory() {
@@ -118,11 +134,27 @@ int main(int argc, char** argv) {
 		}
 	}
 
+	/* Set up message queue */
+	int messageQueueId;
+	key_t key;
+	system("touch keyfile.txt");
+
+	if ((key = ftok("keyfile.txt", 1)) == -1) {
+		perror("OSS: Fatal error generating key using keyfile.txt, terminating...\n");
+		exit(1);
+	}
+
+	if ((messageQueueId = msgget(key, 0644 | IPC_CREAT)) == -1) {
+		perror("OSS: Fatal error getting message queue ID, terminating...\n");
+		exit(1);
+	}
+
 	/* Set up process table */
 	PCB emptyPcb = { false, 0, 0, 0 };
 	for (int i = 0; i < PROCESS_TABLE_MAX_SIZE; i++) {
 		processTable[i] = emptyPcb;
 	}
+	int processIndexToMessage = 0;
 
 	/* Set up shared memory & attach */
 	sharedMemoryId = shmget(SHMKEY, BUFFER_SIZE, 0777 | IPC_CREAT);
@@ -152,12 +184,15 @@ int main(int argc, char** argv) {
 	/* Set up failsafe that kills the program and its children after 60 seconds */
 	signal(SIGALRM, handleFailsafeSignal);
 	alarm(60);
+	signal(SIGINT, handleFailsafeSignal);
 
 	int instancesRunning = 0;
 	int totalInstancesToLaunch = processesAmount;
 	while (totalInstancesToLaunch > 0 || instancesRunning > 0) {
 		pid_t childPid;
 		bool shouldAddToProcessTable = false;
+
+		/* Determining if child should be created */
 		bool shouldFork = totalInstancesToLaunch > 0 && instancesRunning < maxSimultaneousProcesses;
 		bool readyToFork = !forkIntervalEnabled || hasTimePassed(sharedClock[0], sharedClock[1], readyToForkSeconds, readyToForkNano);
 		if (shouldFork && readyToFork) {
@@ -185,6 +220,7 @@ int main(int argc, char** argv) {
 			exit(1);
 			/* Parent process - waits for children to terminate */
 		} else {
+			/* Adds child process to table if one was forked this iteration */
 			if (shouldAddToProcessTable) {
 				int index = findUnoccupiedProcessTableIndex();
 				if (index == -1) {
@@ -194,7 +230,7 @@ int main(int argc, char** argv) {
 				processTable[index] = newPcb;
 			}
 
-			/* Printing PCB table*/
+			/* Printing PCB table */
 			if (hasTimePassed(sharedClock[0], sharedClock[1], pcbTimerSeconds, pcbTimerNano)) {
 				addToClock(pcbTimerSeconds, pcbTimerNano, 0, ONE_BILLION / 2);
 				printf("Entry\tOccupied?\tPID\tStart(s)\tStart(ns)\n");
@@ -205,15 +241,36 @@ int main(int argc, char** argv) {
 				}
 			}
 
-			int status;
-			int pid = waitpid(-1, &status, WNOHANG);
+			processIndexToMessage = findNextProcessInTable(processIndexToMessage);
 
-			if (pid != 0) {
-				removePidFromProcessTable(pid);
-				instancesRunning--;
+			if (processIndexToMessage != -1) {
+				long processPidToMessage = processTable[processIndexToMessage].pid;
+				MessageBuffer messageToSend;
+				messageToSend.messageType = processPidToMessage;
+				messageToSend.value = 1;
+
+				if (msgsnd(messageQueueId, &messageToSend, sizeof(MessageBuffer) - sizeof(long), 0) == -1) {
+					perror("OSS: Fatal error, msgsnd to child failed, terminating...\n");
+					cleanUpSharedMemory();
+					exit(1);
+				}
+
+				MessageBuffer messageReceived;
+				if (msgrcv(messageQueueId, &messageReceived, sizeof(MessageBuffer), getpid(), 0) == -1) {
+					perror("OSS: Fatal error, msgrcv from child failed, terminating...\n");
+					cleanUpSharedMemory();
+					exit(1);
+				}
+
+				if (messageReceived.value == 0) {
+					wait(0);
+					removePidFromProcessTable(processPidToMessage);
+					instancesRunning--;
+				}
 			}
 
-			const int NANO_SECONDS_TO_ADD_EACH_LOOP = ONE_BILLION / 800000;
+			/* Quarter of a second divided by the amount of currently running children */
+			const int NANO_SECONDS_TO_ADD_EACH_LOOP = ONE_BILLION / 4 / instancesRunning;
 			addToClock(sharedClock[0], sharedClock[1], 0, NANO_SECONDS_TO_ADD_EACH_LOOP);
 		}
 	}

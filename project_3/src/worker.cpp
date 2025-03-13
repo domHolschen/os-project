@@ -6,11 +6,17 @@
 #include<string>
 #include<sys/ipc.h>
 #include<sys/shm.h>
+#include<sys/msg.h>
 #include "clockUtils.h"
 using namespace std;
 
 #define SHMKEY 9021011
 #define BUFFER_SIZE sizeof(int) * 2
+
+struct MessageBuffer {
+	long messageType;
+	int value;
+};
 
 /* Function to verify whether the argument is not null, numeric, and at least 1 */
 bool isValidArgument(const char* arg) {
@@ -53,10 +59,25 @@ int main(int argc, char** argv) {
 		printf("WORKER: Invalid or missing nanoseconds argument, defaulting to 1\n");
 	}
 
+	/* Set up message queue */
+	int messageQueueId;
+	key_t key;
+	system("touch keyfile.txt");
+
+	if ((key = ftok("keyfile.txt", 1)) == -1) {
+		perror("WORKER: Fatal error generating key using keyfile.txt, terminating...\n");
+		exit(1);
+	}
+
+	if ((messageQueueId = msgget(key, 0644 | IPC_CREAT)) == -1) {
+		perror("WORKER: Fatal error getting message queue ID, terminating...\n");
+		exit(1);
+	}
+
 	/* Set up shared memory & attach */
 	int sharedMemoryId = shmget(SHMKEY, BUFFER_SIZE, 0777 | IPC_CREAT);
 	if (sharedMemoryId == -1) {
-		fprintf(stderr, "WORKER: Error defining shared memory");
+		fprintf(stderr, "WORKER: Error defining shared memory, terminating...\n");
 		exit(1);
 	}
 	int* sharedClock = (int*)(shmat(sharedMemoryId, 0, 0));
@@ -67,19 +88,32 @@ int main(int argc, char** argv) {
 	printProcessDetails(sharedClock[0], sharedClock[1], terminateSeconds, terminateNano);
 	printf("WORKER: Just starting...\n");
 	int previousSecond = sharedClock[0];
-	int secondsElapsed = 0;
-	/* Loop waits for the terminate time to pass */
-	while (!hasTimePassed(sharedClock[0], sharedClock[1], terminateSeconds, terminateNano)) {
-		/* Checks for when shared clock's seconds update */
-		if (previousSecond < sharedClock[0]) {
-			secondsElapsed++;
-			printProcessDetails(sharedClock[0], sharedClock[1], terminateSeconds, terminateNano);
-			printf("WORKER: %d seconds elapsed since starting\n", secondsElapsed);
+	int iterationsElapsed = 1;
+	bool willTerminate = false;
+
+	while (!willTerminate) {
+		/* Wait for message from oss (parent) */
+		MessageBuffer messageReceived;
+		if (msgrcv(messageQueueId, &messageReceived, sizeof(MessageBuffer), getppid(), 0) == -1) {
+			perror("WORKER: Fatal error, msgrcv from parent failed, terminating...\n");
+			exit(1);
 		}
-		previousSecond = sharedClock[0];
+		/* Check clock and print */
+		willTerminate = hasTimePassed(sharedClock[0], sharedClock[1], terminateSeconds, terminateNano);
+		printProcessDetails(sharedClock[0], sharedClock[1], terminateSeconds, terminateNano);
+		printf("WORKER: %d iterations elapsed since starting\n", iterationsElapsed++);
+		/* Send message back to parent whether it will terminate or not */
+		MessageBuffer messageToSend;
+		messageToSend.messageType = getppid();
+		messageToSend.value = willTerminate ? 0 : 1;
+
+		if (msgsnd(messageQueueId, &messageToSend, sizeof(MessageBuffer) - sizeof(long), 0) == -1) {
+			perror("OSS: Fatal error, msgsnd to parent failed, terminating...\n");
+			exit(1);
+		}
 	}
 	printProcessDetails(sharedClock[0], sharedClock[1], terminateSeconds, terminateNano);
-	printf("WORKER: Terminating...\n");
+	printf("WORKER: Time limit reached, terminating...\n");
 
 	shmdt(sharedClock);
 
