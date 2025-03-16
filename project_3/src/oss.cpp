@@ -22,6 +22,7 @@ struct PCB {
 	pid_t pid; // process id of this child
 	int startSeconds; // time when it was forked
 	int startNano; // time when it was forked
+	int messagesSent; // number of messages sent to the process
 };
 struct PCB processTable[PROCESS_TABLE_MAX_SIZE];
 struct MessageBuffer {
@@ -241,9 +242,11 @@ int main(int argc, char** argv) {
 				}
 			}
 
+			/* Finds process to message, then sends message */
 			processIndexToMessage = findNextProcessInTable(processIndexToMessage);
 
 			if (processIndexToMessage != -1) {
+				/* Set up and send message to child */
 				long processPidToMessage = processTable[processIndexToMessage].pid;
 				MessageBuffer messageToSend;
 				messageToSend.messageType = processPidToMessage;
@@ -255,6 +258,7 @@ int main(int argc, char** argv) {
 					exit(1);
 				}
 
+				/* Receive message from child and handle it */
 				MessageBuffer messageReceived;
 				if (msgrcv(messageQueueId, &messageReceived, sizeof(MessageBuffer), getpid(), 0) == -1) {
 					perror("OSS: Fatal error, msgrcv from child failed, terminating...\n");
