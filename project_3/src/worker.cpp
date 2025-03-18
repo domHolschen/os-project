@@ -94,7 +94,7 @@ int main(int argc, char** argv) {
 	while (!willTerminate) {
 		/* Wait for message from oss (parent) */
 		MessageBuffer messageReceived;
-		if (msgrcv(messageQueueId, &messageReceived, sizeof(MessageBuffer), getppid(), 0) == -1) {
+		if (msgrcv(messageQueueId, &messageReceived, sizeof(MessageBuffer), getpid(), 0) == -1) {
 			perror("WORKER: Fatal error, msgrcv from parent failed, terminating...\n");
 			exit(1);
 		}

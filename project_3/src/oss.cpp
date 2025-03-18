@@ -71,7 +71,7 @@ void removePidFromProcessTable(pid_t pid) {
 /* Finds the next running process in the process table. If it loops past the end of the array, it resets to 0. Returns -1 if all are unoccupied */
 int findNextProcessInTable(int currentIndex) {
 	for (int i = 0; i < PROCESS_TABLE_MAX_SIZE; i++) {
-		int indexToCheck = (i + currentIndex) % PROCESS_TABLE_MAX_SIZE;
+		int indexToCheck = (i + currentIndex + 1) % PROCESS_TABLE_MAX_SIZE;
 		if (processTable[indexToCheck].occupied) {
 			return indexToCheck;
 		}
@@ -156,6 +156,7 @@ int main(int argc, char** argv) {
 		processTable[i] = emptyPcb;
 	}
 	int processIndexToMessage = 0;
+	int totalMessagesSent = 0;
 
 	/* Set up shared memory & attach */
 	sharedMemoryId = shmget(SHMKEY, BUFFER_SIZE, 0777 | IPC_CREAT);
@@ -190,7 +191,7 @@ int main(int argc, char** argv) {
 	int instancesRunning = 0;
 	int totalInstancesToLaunch = processesAmount;
 	while (totalInstancesToLaunch > 0 || instancesRunning > 0) {
-		pid_t childPid;
+		pid_t childPid = -1;
 		bool shouldAddToProcessTable = false;
 
 		/* Determining if child should be created */
@@ -234,11 +235,12 @@ int main(int argc, char** argv) {
 			/* Printing PCB table */
 			if (hasTimePassed(sharedClock[0], sharedClock[1], pcbTimerSeconds, pcbTimerNano)) {
 				addToClock(pcbTimerSeconds, pcbTimerNano, 0, ONE_BILLION / 2);
-				printf("Entry\tOccupied?\tPID\tStart(s)\tStart(ns)\n");
+				printf("Process table:\nEntry\tOccupied?\tPID\t\tStart(s)\tStart(ns)\tMessages Sent\n");
 				for (int i = 0; i < PROCESS_TABLE_MAX_SIZE; i++) {
 					int entry = i;
 					const char* isOccupied = processTable[i].occupied ? "true" : "false";
-					printf("%d\t%s\t\t%d\t%d\t\t%d\n", entry, isOccupied, processTable[i].pid, processTable[i].startSeconds, processTable[i].startNano);
+					const char* tabIfNanosecondsIsZero = processTable[i].startNano == 0 ? "\t" : "";
+					printf("%d\t%s\t\t%d\t\t%d\t\t%d\t%s%d\n", entry, isOccupied, processTable[i].pid, processTable[i].startSeconds, processTable[i].startNano, tabIfNanosecondsIsZero, processTable[i].messagesSent);
 				}
 			}
 
@@ -252,13 +254,17 @@ int main(int argc, char** argv) {
 				messageToSend.messageType = processPidToMessage;
 				messageToSend.value = 1;
 
+				printf("OSS: Sending message to worker %d (PID: %ld) at time %d:%d\n", processIndexToMessage, processPidToMessage, sharedClock[0], sharedClock[1]);
 				if (msgsnd(messageQueueId, &messageToSend, sizeof(MessageBuffer) - sizeof(long), 0) == -1) {
 					perror("OSS: Fatal error, msgsnd to child failed, terminating...\n");
 					cleanUpSharedMemory();
 					exit(1);
 				}
+				processTable[processIndexToMessage].messagesSent++;
+				totalMessagesSent++;
 
 				/* Receive message from child and handle it */
+				printf("OSS: Receiving message from worker %d (PID: %ld) at time %d:%d\n", processIndexToMessage, processPidToMessage, sharedClock[0], sharedClock[1]);
 				MessageBuffer messageReceived;
 				if (msgrcv(messageQueueId, &messageReceived, sizeof(MessageBuffer), getpid(), 0) == -1) {
 					perror("OSS: Fatal error, msgrcv from child failed, terminating...\n");
@@ -267,19 +273,20 @@ int main(int argc, char** argv) {
 				}
 
 				if (messageReceived.value == 0) {
+					printf("OSS: Worker %d (PID: %ld) is planning to terminate\n", processIndexToMessage, processPidToMessage);
 					wait(0);
 					removePidFromProcessTable(processPidToMessage);
 					instancesRunning--;
 				}
 			}
 
-			/* Quarter of a second divided by the amount of currently running children */
-			const int NANO_SECONDS_TO_ADD_EACH_LOOP = ONE_BILLION / 4 / instancesRunning;
+			/* Quarter of a second divided by the amount of currently running children. Ternary prevents dividing by 0 errors */
+			int NANO_SECONDS_TO_ADD_EACH_LOOP = instancesRunning > 0 ? ONE_BILLION / 4 / instancesRunning : ONE_BILLION / 4;
 			addToClock(sharedClock[0], sharedClock[1], 0, NANO_SECONDS_TO_ADD_EACH_LOOP);
 		}
 	}
 
-	printf("OSS: Created all children and all children terminated, terminating...\n");
+	printf("OSS: All child processes have been executed and are finished.\nTotal child processes launched: %d\nTotal messages sent: %d\n", processesAmount, totalMessagesSent);
 	cleanUpSharedMemory();
 	return EXIT_SUCCESS;
 }
