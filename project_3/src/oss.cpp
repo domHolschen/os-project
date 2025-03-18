@@ -9,6 +9,7 @@
 #include<signal.h>
 #include<cstdlib>
 #include<sys/msg.h>
+#include<stdarg.h>
 #include "clockUtils.h"
 using namespace std;
 
@@ -31,14 +32,16 @@ struct MessageBuffer {
 };
 int sharedMemoryId;
 int* sharedClock;
+FILE* logFile = NULL;
 
 void printHelp() {
-	printf("Usage: oss [-h] [-n proc] [-s simul] [-t iter]\n");
+	printf("Usage: oss [-h] [-n proc] [-s simul] [-t iter] [-f logfile]\n");
 	printf("-h : Print options for the oss tool and exits\n");
 	printf("-n : Total number of processes to run (default: 1)\n");
 	printf("-s : Maximum number of simultaneously running processes. Maximum of %d (default: %d)\n", PROCESS_TABLE_MAX_SIZE, PROCESS_TABLE_MAX_SIZE);
 	printf("-t : Maximum number of seconds that workers will run (default: 1)\n");
 	printf("-i : Interval (in ms) to launch child processes (default: 0)\n");
+	printf("-f : Specify a filename to save a copy of oss's logs to (disabled by default)\n");
 }
 
 /* Takes in optarg and returns int. Defaults to 1 if out of bounds */
@@ -79,10 +82,34 @@ int findNextProcessInTable(int currentIndex) {
 	return -1;
 }
 
+/* Acts as a printf statement that writes to both the console and a file if defined */
+void printfConsoleAndFile(const char* baseString, ...) {
+	va_list args;
+
+	va_start(args, baseString);
+	vprintf(baseString, args);
+	va_end(args);
+
+	if (logFile == NULL) {
+		return;
+	}
+
+	va_start(args, baseString);
+	vfprintf(logFile, baseString, args);
+	va_end(args);
+	fflush(logFile);
+}
+
 /* Detaches pointer and clears shared memory at the key */
 void cleanUpSharedMemory() {
 	shmdt(sharedClock);
 	shmctl(sharedMemoryId, IPC_RMID, NULL);
+}
+
+void closeLogFileIfOpen() {
+	if (logFile != NULL) {
+		fclose(logFile);
+	}
 }
 
 /* Kills child processes and clears shared memory */
@@ -95,12 +122,13 @@ void handleFailsafeSignal(int signal) {
 		}
 	}
 	cleanUpSharedMemory();
+	closeLogFileIfOpen();
 
 	exit(1);
 }
 
 int main(int argc, char** argv) {
-	const char optstr[] = "hn:s:t:i:";
+	const char optstr[] = "hn:s:t:i:f:";
 	char opt;
 
 	/* Default parameters */
@@ -132,6 +160,14 @@ int main(int argc, char** argv) {
 				forkIntervalMs = processOptarg(optarg);
 				forkIntervalEnabled = true;
 				break;
+			case 'f':
+				string systemCall = "touch " + string(optarg);
+				system(systemCall.c_str());
+				logFile = fopen(optarg, "w");
+				if (!logFile) {
+					perror("OSS: Fatal error opening log file, terminating...\n");
+					exit(1);
+				}
 		}
 	}
 
@@ -142,11 +178,13 @@ int main(int argc, char** argv) {
 
 	if ((key = ftok("keyfile.txt", 1)) == -1) {
 		perror("OSS: Fatal error generating key using keyfile.txt, terminating...\n");
+		closeLogFileIfOpen();
 		exit(1);
 	}
 
 	if ((messageQueueId = msgget(key, 0644 | IPC_CREAT)) == -1) {
 		perror("OSS: Fatal error getting message queue ID, terminating...\n");
+		closeLogFileIfOpen();
 		exit(1);
 	}
 
@@ -161,7 +199,8 @@ int main(int argc, char** argv) {
 	/* Set up shared memory & attach */
 	sharedMemoryId = shmget(SHMKEY, BUFFER_SIZE, 0777 | IPC_CREAT);
 	if (sharedMemoryId == -1) {
-		fprintf(stderr, "OSS: Error defining shared memory");
+		perror("OSS: Error defining shared memory");
+		closeLogFileIfOpen();
 		exit(1);
 	}
 	sharedClock = (int*)(shmat(sharedMemoryId, 0, 0));
@@ -218,7 +257,8 @@ int main(int argc, char** argv) {
 			string arg1 = to_string(rand() % maxSeconds);
 			string arg2 = to_string(rand() % ONE_BILLION);
 			execlp(arg0.c_str(), arg0.c_str(), arg1.c_str(), arg2.c_str(), (char*)0);
-			fprintf(stderr, "OSS: Launching worker failed, terminating\n");
+			perror("OSS: Launching worker failed, terminating\n");
+			closeLogFileIfOpen();
 			exit(1);
 			/* Parent process - waits for children to terminate */
 		} else {
@@ -226,7 +266,7 @@ int main(int argc, char** argv) {
 			if (shouldAddToProcessTable) {
 				int index = findUnoccupiedProcessTableIndex();
 				if (index == -1) {
-					fprintf(stderr, "OSS: No unoccupied entry in process table found. Continuing child execution\n");
+					printfConsoleAndFile("OSS: No unoccupied entry in process table found. Continuing child execution\n");
 				}
 				PCB newPcb = { true, childPid, sharedClock[0], sharedClock[1] };
 				processTable[index] = newPcb;
@@ -235,12 +275,12 @@ int main(int argc, char** argv) {
 			/* Printing PCB table */
 			if (hasTimePassed(sharedClock[0], sharedClock[1], pcbTimerSeconds, pcbTimerNano)) {
 				addToClock(pcbTimerSeconds, pcbTimerNano, 0, ONE_BILLION / 2);
-				printf("Process table:\nEntry\tOccupied?\tPID\t\tStart(s)\tStart(ns)\tMessages Sent\n");
+				printfConsoleAndFile("Process table:\nEntry\tOccupied?\tPID\t\tStart(s)\tStart(ns)\tMessages Sent\n");
 				for (int i = 0; i < PROCESS_TABLE_MAX_SIZE; i++) {
 					int entry = i;
 					const char* isOccupied = processTable[i].occupied ? "true" : "false";
 					const char* tabIfNanosecondsIsZero = processTable[i].startNano == 0 ? "\t" : "";
-					printf("%d\t%s\t\t%d\t\t%d\t\t%d\t%s%d\n", entry, isOccupied, processTable[i].pid, processTable[i].startSeconds, processTable[i].startNano, tabIfNanosecondsIsZero, processTable[i].messagesSent);
+					printfConsoleAndFile("%d\t%s\t\t%d\t\t%d\t\t%d\t%s%d\n", entry, isOccupied, processTable[i].pid, processTable[i].startSeconds, processTable[i].startNano, tabIfNanosecondsIsZero, processTable[i].messagesSent);
 				}
 			}
 
@@ -254,26 +294,28 @@ int main(int argc, char** argv) {
 				messageToSend.messageType = processPidToMessage;
 				messageToSend.value = 1;
 
-				printf("OSS: Sending message to worker %d (PID: %ld) at time %d:%d\n", processIndexToMessage, processPidToMessage, sharedClock[0], sharedClock[1]);
+				printfConsoleAndFile("OSS: Sending message to worker %d (PID: %ld) at time %d:%d\n", processIndexToMessage, processPidToMessage, sharedClock[0], sharedClock[1]);
 				if (msgsnd(messageQueueId, &messageToSend, sizeof(MessageBuffer) - sizeof(long), 0) == -1) {
 					perror("OSS: Fatal error, msgsnd to child failed, terminating...\n");
 					cleanUpSharedMemory();
+					closeLogFileIfOpen();
 					exit(1);
 				}
 				processTable[processIndexToMessage].messagesSent++;
 				totalMessagesSent++;
 
 				/* Receive message from child and handle it */
-				printf("OSS: Receiving message from worker %d (PID: %ld) at time %d:%d\n", processIndexToMessage, processPidToMessage, sharedClock[0], sharedClock[1]);
+				printfConsoleAndFile("OSS: Receiving message from worker %d (PID: %ld) at time %d:%d\n", processIndexToMessage, processPidToMessage, sharedClock[0], sharedClock[1]);
 				MessageBuffer messageReceived;
 				if (msgrcv(messageQueueId, &messageReceived, sizeof(MessageBuffer), getpid(), 0) == -1) {
 					perror("OSS: Fatal error, msgrcv from child failed, terminating...\n");
 					cleanUpSharedMemory();
+					closeLogFileIfOpen();
 					exit(1);
 				}
 
 				if (messageReceived.value == 0) {
-					printf("OSS: Worker %d (PID: %ld) is planning to terminate\n", processIndexToMessage, processPidToMessage);
+					printfConsoleAndFile("OSS: Worker %d (PID: %ld) is planning to terminate\n", processIndexToMessage, processPidToMessage);
 					wait(0);
 					removePidFromProcessTable(processPidToMessage);
 					instancesRunning--;
@@ -286,7 +328,8 @@ int main(int argc, char** argv) {
 		}
 	}
 
-	printf("OSS: All child processes have been executed and are finished.\nTotal child processes launched: %d\nTotal messages sent: %d\n", processesAmount, totalMessagesSent);
+	printfConsoleAndFile("OSS: All child processes have been executed and are finished.\nTotal child processes launched: %d\nTotal messages sent: %d\n", processesAmount, totalMessagesSent);
 	cleanUpSharedMemory();
+	closeLogFileIfOpen();
 	return EXIT_SUCCESS;
 }
