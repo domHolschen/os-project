@@ -1,6 +1,6 @@
 os-project by Dominic Holschen
-Project 2
-See the repo on github: https://github.com/domHolschen/os-project, folder project_2
+Project 3
+See the repo on github: https://github.com/domHolschen/os-project, folder project_3
 
 To Compile:
 Use the `make` command to invoke the Makefile and create the executables `worker` and `oss`.

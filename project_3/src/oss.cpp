@@ -201,6 +201,7 @@ int main(int argc, char** argv) {
 	if (sharedMemoryId == -1) {
 		perror("OSS: Error defining shared memory");
 		closeLogFileIfOpen();
+		msgctl(messageQueueId, IPC_RMID, NULL);
 		exit(1);
 	}
 	sharedClock = (int*)(shmat(sharedMemoryId, 0, 0));
@@ -258,7 +259,6 @@ int main(int argc, char** argv) {
 			string arg2 = to_string(rand() % ONE_BILLION);
 			execlp(arg0.c_str(), arg0.c_str(), arg1.c_str(), arg2.c_str(), (char*)0);
 			perror("OSS: Launching worker failed, terminating\n");
-			closeLogFileIfOpen();
 			exit(1);
 			/* Parent process - waits for children to terminate */
 		} else {
@@ -299,6 +299,7 @@ int main(int argc, char** argv) {
 					perror("OSS: Fatal error, msgsnd to child failed, terminating...\n");
 					cleanUpSharedMemory();
 					closeLogFileIfOpen();
+					msgctl(messageQueueId, IPC_RMID, NULL);
 					exit(1);
 				}
 				processTable[processIndexToMessage].messagesSent++;
@@ -311,6 +312,7 @@ int main(int argc, char** argv) {
 					perror("OSS: Fatal error, msgrcv from child failed, terminating...\n");
 					cleanUpSharedMemory();
 					closeLogFileIfOpen();
+					msgctl(messageQueueId, IPC_RMID, NULL);
 					exit(1);
 				}
 
@@ -331,5 +333,6 @@ int main(int argc, char** argv) {
 	printfConsoleAndFile("OSS: All child processes have been executed and are finished.\nTotal child processes launched: %d\nTotal messages sent: %d\n", processesAmount, totalMessagesSent);
 	cleanUpSharedMemory();
 	closeLogFileIfOpen();
+	msgctl(messageQueueId, IPC_RMID, NULL);
 	return EXIT_SUCCESS;
 }
