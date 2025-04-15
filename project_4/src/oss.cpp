@@ -17,6 +17,8 @@ using namespace std;
 #define BUFFER_SIZE sizeof(int) * 2
 const int PROCESS_TABLE_MAX_SIZE = 20;
 const int ONE_BILLION = 1000000000;
+const int MAX_TIME_BETWEEN_FORK_NANO = ONE_BILLION - 1;
+const int MAX_TIME_BETWEEN_FORK_SECS = 1;
 
 struct PCB {
 	bool occupied; // either true or false
@@ -24,6 +26,11 @@ struct PCB {
 	int startSeconds; // time when it was forked
 	int startNano; // time when it was forked
 	int messagesSent; // number of messages sent to the process
+	int serviceTimeSeconds; // total seconds it has been "scheduled"
+	int serviceTimeNano; // total nanoseconds it has been "scheduled"
+	int eventWaitSec; // when does its event happen?
+	int eventWaitNano; // when does its event happen?
+	bool blocked; // is this process waiting on event?
 };
 struct PCB processTable[PROCESS_TABLE_MAX_SIZE];
 struct MessageBuffer {
@@ -33,15 +40,17 @@ struct MessageBuffer {
 int sharedMemoryId;
 int* sharedClock;
 FILE* logFile = NULL;
+struct Queue {
+	pid_t[] pids;
+	int count;
+	int quantumNano;
+	int quantumSeconds;
+};
+struct Queue queues[3];
 
 void printHelp() {
-	printf("Usage: oss [-h] [-n proc] [-s simul] [-t iter] [-f logfile]\n");
+	printf("Usage: oss [-h]\n");
 	printf("-h : Print options for the oss tool and exits\n");
-	printf("-n : Total number of processes to run (default: 1)\n");
-	printf("-s : Maximum number of simultaneously running processes. Maximum of %d (default: %d)\n", PROCESS_TABLE_MAX_SIZE, PROCESS_TABLE_MAX_SIZE);
-	printf("-t : Maximum number of seconds that workers will run (default: 1)\n");
-	printf("-i : Interval (in ms) to launch child processes (default: 0)\n");
-	printf("-f : Specify a filename to save a copy of oss's logs to (disabled by default)\n");
 }
 
 /* Takes in optarg and returns int. Defaults to 1 if out of bounds */
@@ -128,7 +137,7 @@ void handleFailsafeSignal(int signal) {
 }
 
 int main(int argc, char** argv) {
-	const char optstr[] = "hn:s:t:i:f:";
+	const char optstr[] = "h";
 	char opt;
 
 	/* Default parameters */
@@ -144,31 +153,7 @@ int main(int argc, char** argv) {
 			case 'h':
 				printHelp();
 				return EXIT_SUCCESS;
-			case 'n':
-				processesAmount = processOptarg(optarg);
-				break;
-			case 's':
-				maxSimultaneousProcesses = processOptarg(optarg);
-				if (maxSimultaneousProcesses > PROCESS_TABLE_MAX_SIZE) {
-					maxSimultaneousProcesses = PROCESS_TABLE_MAX_SIZE;
-				}
-				break;
-			case 't':
-				maxSeconds = processOptarg(optarg);
-				break;
-			case 'i':
-				forkIntervalMs = processOptarg(optarg);
-				forkIntervalEnabled = true;
-				break;
-			case 'f':
-				string systemCall = "touch " + string(optarg);
-				system(systemCall.c_str());
-				logFile = fopen(optarg, "w");
-				if (!logFile) {
-					perror("OSS: Fatal error opening log file, terminating...\n");
-					exit(1);
-				}
-		}
+			}
 	}
 
 	/* Set up message queue */
@@ -219,10 +204,6 @@ int main(int argc, char** argv) {
 	int readyToForkSeconds = 0;
 	int readyToForkNano = 0;
 
-	/* Interval converted to our clock's units */
-	int intervalSeconds = forkIntervalMs / 1000;
-	int intervalNano = (forkIntervalMs % 1000) * 1000000;
-
 	/* Set up failsafe that kills the program and its children after 60 seconds */
 	signal(SIGALRM, handleFailsafeSignal);
 	alarm(60);
@@ -255,9 +236,7 @@ int main(int argc, char** argv) {
 		/* Child process - launches worker */
 		if (childPid == 0) {
 			string arg0 = "./worker";
-			string arg1 = to_string(rand() % maxSeconds);
-			string arg2 = to_string(rand() % ONE_BILLION);
-			execlp(arg0.c_str(), arg0.c_str(), arg1.c_str(), arg2.c_str(), (char*)0);
+			execlp(arg0.c_str(), arg0.c_str(), (char*)0);
 			perror("OSS: Launching worker failed, terminating\n");
 			exit(1);
 			/* Parent process - waits for children to terminate */

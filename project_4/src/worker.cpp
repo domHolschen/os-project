@@ -7,6 +7,7 @@
 #include<sys/ipc.h>
 #include<sys/shm.h>
 #include<sys/msg.h>
+#include<random>
 #include "clockUtils.h"
 using namespace std;
 
@@ -18,24 +19,6 @@ struct MessageBuffer {
 	int value;
 };
 
-/* Function to verify whether the argument is not null, numeric, and at least 1 */
-bool isValidArgument(const char* arg) {
-	if (arg == NULL || *arg == '\0') {
-		return false;
-	}
-
-	const char* argToStepThrough = arg;
-	while (*argToStepThrough) {
-		if (!isdigit(*argToStepThrough)) {
-			return false;
-		}
-		argToStepThrough++;
-	}
-
-	int argAsInt = atoi(arg);
-	return argAsInt > 0;
-}
-
 /* Prepared printf statement that displays clock & process details */
 void printProcessDetails(int simClockS, int simClockN, int termTimeS, int termTimeN) {
 	printf("WORKER: PID:%d PPID:%d Clock(s):%d Clock(ns):%d Terminate(s):%d Terminate(ns):%d\n", getpid(), getppid(), simClockS, simClockN, termTimeS, termTimeN);
@@ -45,19 +28,6 @@ void printProcessDetails(int simClockS, int simClockN, int termTimeS, int termTi
 int main(int argc, char** argv) {
 	int terminateSeconds = 0;
 	int terminateNano = 0;
-	if (isValidArgument(argv[1])) {
-		terminateSeconds = atoi(argv[1]);
-	} else {
-		terminateSeconds = 1;
-		printf("WORKER: Invalid or missing seconds argument, defaulting to 1\n");
-	}
-	if (isValidArgument(argv[2])) {
-		terminateNano = atoi(argv[2]);
-	}
-	else {
-		terminateNano = 1;
-		printf("WORKER: Invalid or missing nanoseconds argument, defaulting to 1\n");
-	}
 
 	/* Set up message queue */
 	int messageQueueId;
@@ -98,8 +68,6 @@ int main(int argc, char** argv) {
 			perror("WORKER: Fatal error, msgrcv from parent failed, terminating...\n");
 			exit(1);
 		}
-		/* Check clock and print */
-		willTerminate = hasTimePassed(sharedClock[0], sharedClock[1], terminateSeconds, terminateNano);
 		printProcessDetails(sharedClock[0], sharedClock[1], terminateSeconds, terminateNano);
 		printf("WORKER: %d iterations elapsed since starting\n", iterationsElapsed++);
 		/* Send message back to parent whether it will terminate or not */
