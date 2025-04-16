@@ -29,8 +29,8 @@ struct PCB {
 	int messagesSent; // number of messages sent to the process
 	int serviceTimeSeconds; // total seconds it has been "scheduled"
 	int serviceTimeNano; // total nanoseconds it has been "scheduled"
-	int eventWaitSec; // when does its event happen?
-	int eventWaitNano; // when does its event happen?
+	int eventUnblockSeconds; // when does its event happen?
+	int eventUnblockNano; // when does its event happen?
 	bool blocked; // is this process waiting on event?
 };
 struct PCB processTable[PROCESS_TABLE_MAX_SIZE];
@@ -215,6 +215,11 @@ int main(int argc, char** argv) {
 		/* doubles queue quantum duration */
 		addToClock(queueQuantumSeconds, queueQuantumNano, queueQuantumSeconds, queueQuantumNano);
 	}
+	/* Since blocked queue is not FIFO we just use a normal array */
+	int blockedQueue[20];
+	for (int j = 0; j < PROCESS_TABLE_MAX_SIZE; j++) {
+		blockedQueue[j] = -1;
+	}
 
 	/* Set up shared memory & attach */
 	sharedMemoryId = shmget(SHMKEY, BUFFER_SIZE, 0777 | IPC_CREAT);
@@ -243,12 +248,15 @@ int main(int argc, char** argv) {
 	int maxTimeBetweenForkSeconds = 0;
 	int maxTimeBetweenForkNano = ONE_BILLION / 5;
 
+	/* Timers for statistics */
+
 	/* Set up failsafe that kills the program and its children after 3 (real life) seconds */
 	signal(SIGALRM, handleFailsafeSignal);
 	alarm(3);
 	signal(SIGINT, handleFailsafeSignal);
 
 	int instancesRunning = 0;
+	int instancesBlocked = 0;
 	int totalInstancesToLaunch = 100;
 
 	int instancesTerminated = 0;
@@ -290,12 +298,6 @@ int main(int argc, char** argv) {
 			exit(1);
 			/* Parent process - waits for children to terminate */
 		} else {
-			/*If nothing to do*/
-			if (instancesRunning == 0) {
-				printfConsoleAndFile("OSS: Nothing to do, incrementing clock by 10 ms\n");
-				addToClock(sharedClock[0], sharedClock[1], 0, ONE_BILLION / 100);
-				continue;
-			}
 			/* Adds child process to table if one was forked this iteration */
 			if (shouldAddToProcessTable) {
 				int index = findUnoccupiedProcessTableIndex();
@@ -330,6 +332,38 @@ int main(int argc, char** argv) {
 					}
 					printfConsoleAndFile("\n");
 				}
+				printfConsoleAndFile("blocked: ");
+				for (int i = 0; i < PROCESS_TABLE_MAX_SIZE; i++) {
+					if (blockedQueue[i] != -1) {
+						printfConsoleAndFile("%d ", blockedQueue[i]);
+					}
+				}
+				printfConsoleAndFile("\n");
+			}
+
+			/* Scans blocked queue and puts a worker in ready state if it can */
+			for (int i = 0; i < PROCESS_TABLE_MAX_SIZE; i++) {
+				int processIndex = blockedQueue[i];
+				if (processIndex != -1) {
+					PCB blockedProcess = processTable[processIndex];
+					if (blockedProcess.blocked && hasTimePassed(sharedClock[0], sharedClock[1], blockedProcess.eventUnblockSeconds, blockedProcess.eventUnblockNano)) {
+						blockedProcess.blocked = false;
+						blockedQueue[i] = -1;
+						instancesBlocked--;
+						queuePush(processIndex, queues[0]);
+						printfConsoleAndFile("OSS: Worker %d unblocked\n", processIndex);
+
+						/* Add 1ms to the clock */
+						addToClock(sharedClock[0], sharedClock[1], 0, ONE_BILLION / 1000);
+					}
+				}
+			}
+
+			/*If nothing to do*/
+			if (instancesRunning - instancesBlocked == 0) {
+				printfConsoleAndFile("OSS: Nothing to do, incrementing clock by 100 ms\n");
+				addToClock(sharedClock[0], sharedClock[1], 0, ONE_BILLION / 10);
+				continue;
 			}
 
 			/* Finds next process to execute, then sends message */
@@ -382,8 +416,16 @@ int main(int argc, char** argv) {
 					/* Blocked by I/O event */
 					if (childExecutionTime < quantum) {
 						printfConsoleAndFile("OSS: Worker %d (PID: %ld) did not use full quantum and was blocked\n", processIndexToExecute, processPidToMessage);
-						/* TODO */
-						queuePush(processIndexToExecute, queues[0]);
+						instancesBlocked++;
+						processTable[processIndexToExecute].blocked = true;
+						processTable[processIndexToExecute].eventUnblockSeconds = rand() % 6;
+						processTable[processIndexToExecute].eventUnblockNano = rand() % 1001;
+						for (int i = 0; i < PROCESS_TABLE_MAX_SIZE; i++) {
+							if (blockedQueue[i] == -1) {
+								blockedQueue[i] = processIndexToExecute;
+								break;
+							}
+						}
 					}
 					/* Used full quantum */
 					else {
