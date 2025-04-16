@@ -7,7 +7,7 @@
 #include<sys/ipc.h>
 #include<sys/shm.h>
 #include<sys/msg.h>
-#include<random>
+#include<cstdlib>
 #include "clockUtils.h"
 using namespace std;
 
@@ -24,10 +24,15 @@ void printProcessDetails(int simClockS, int simClockN, int termTimeS, int termTi
 	printf("WORKER: PID:%d PPID:%d Clock(s):%d Clock(ns):%d Terminate(s):%d Terminate(ns):%d\n", getpid(), getppid(), simClockS, simClockN, termTimeS, termTimeN);
 }
 
+/* Randomly generate true/false based on percentage */
+bool percentChance(int percentage) {
+	return rand() % 100 < percentage;
+}
+
 /* Main method, defines the terminal command */
 int main(int argc, char** argv) {
-	int terminateSeconds = 0;
-	int terminateNano = 0;
+	/* Set up random seed based on pid */
+	srand(getpid());
 
 	/* Set up message queue */
 	int messageQueueId;
@@ -51,38 +56,44 @@ int main(int argc, char** argv) {
 		exit(1);
 	}
 	int* sharedClock = (int*)(shmat(sharedMemoryId, 0, 0));
-
-	/* Adds simulated clock's time to the passed in duration to get the time to terminate */
-	addToClock(terminateSeconds, terminateNano, sharedClock[0], sharedClock[1]);
-
-	printProcessDetails(sharedClock[0], sharedClock[1], terminateSeconds, terminateNano);
-	printf("WORKER: Just starting...\n");
-	int previousSecond = sharedClock[0];
-	int iterationsElapsed = 1;
-	bool willTerminate = false;
-
-	while (!willTerminate) {
+	
+	while (true) {
 		/* Wait for message from oss (parent) */
 		MessageBuffer messageReceived;
 		if (msgrcv(messageQueueId, &messageReceived, sizeof(MessageBuffer), getpid(), 0) == -1) {
 			perror("WORKER: Fatal error, msgrcv from parent failed, terminating...\n");
 			exit(1);
 		}
-		printProcessDetails(sharedClock[0], sharedClock[1], terminateSeconds, terminateNano);
-		printf("WORKER: %d iterations elapsed since starting\n", iterationsElapsed++);
-		/* Send message back to parent whether it will terminate or not */
+		int timeScheduled = messageReceived.value;
+
+		/* Rolls whether the process will terminate or get blocked */
+		bool willTerminate = percentChance(10);
+		bool willGetBlockedByIO = percentChance(30);
+
+		/* If planning to terminate or get blocked, randomly truncate quantum */
+		if (willTerminate || willGetBlockedByIO) {
+			int p = rand() % 99 + 1;
+			timeScheduled /= 100;
+			timeScheduled *= p;
+		}
+
+		/* Send message back to parent */
 		MessageBuffer messageToSend;
 		messageToSend.messageType = getppid();
-		messageToSend.value = willTerminate ? 0 : 1;
+		/* Sends time executed to parent as negative if it ends up terminating */
+		messageToSend.value = willTerminate ? -timeScheduled : timeScheduled;
 
 		if (msgsnd(messageQueueId, &messageToSend, sizeof(MessageBuffer) - sizeof(long), 0) == -1) {
-			perror("OSS: Fatal error, msgsnd to parent failed, terminating...\n");
+			perror("WORKER: Fatal error, msgsnd to parent failed, terminating...\n");
 			exit(1);
 		}
-	}
-	printProcessDetails(sharedClock[0], sharedClock[1], terminateSeconds, terminateNano);
-	printf("WORKER: Time limit reached, terminating...\n");
 
+		if (willTerminate) {
+			break;
+		}
+	}
+
+	/* Clean up shared memory */
 	shmdt(sharedClock);
 
 	return EXIT_SUCCESS;

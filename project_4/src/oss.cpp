@@ -16,6 +16,7 @@ using namespace std;
 #define SHMKEY 9021011
 #define BUFFER_SIZE sizeof(int) * 2
 const int PROCESS_TABLE_MAX_SIZE = 20;
+const int QUEUE_LEVELS = 3;
 const int ONE_BILLION = 1000000000;
 const int MAX_TIME_BETWEEN_FORK_NANO = ONE_BILLION - 1;
 const int MAX_TIME_BETWEEN_FORK_SECS = 1;
@@ -40,13 +41,16 @@ struct MessageBuffer {
 int sharedMemoryId;
 int* sharedClock;
 FILE* logFile = NULL;
-struct Queue {
-	pid_t[] pids;
-	int count;
-	int quantumNano;
+
+struct ProcessQueue {
+	int* pcbTableEntry;
+	int front;
+	int back;
 	int quantumSeconds;
+	int quantumNano;
+	int currentSize = 0;
+	int maxSize;
 };
-struct Queue queues[3];
 
 void printHelp() {
 	printf("Usage: oss [-h]\n");
@@ -89,6 +93,31 @@ int findNextProcessInTable(int currentIndex) {
 		}
 	}
 	return -1;
+}
+
+/* Put an int (the index of the PCB table) inside of a provided queue struct */
+void queuePush(int pcbIndex, ProcessQueue& queue) {
+	int location = (queue.back + 1) % PROCESS_TABLE_MAX_SIZE;
+	queue.pcbTableEntry[location] = pcbIndex;
+	queue.back = location;
+	queue.currentSize++;
+}
+
+/* Remove head of queue and return the value of it */
+int queuePop(ProcessQueue& queue) {
+	int value = queue.pcbTableEntry[queue.front];
+	if (value == -1) {
+		perror("ERROR popped -1\n");
+	}
+	queue.pcbTableEntry[queue.front] = -1;
+	queue.front = (queue.front + 1) % PROCESS_TABLE_MAX_SIZE;
+	queue.currentSize--;
+	return value;
+}
+
+/* Get a float between 0 and max */
+float randFloat(float max) {
+	return static_cast<float>(rand()) / RAND_MAX * max;
 }
 
 /* Acts as a printf statement that writes to both the console and a file if defined */
@@ -140,13 +169,6 @@ int main(int argc, char** argv) {
 	const char optstr[] = "h";
 	char opt;
 
-	/* Default parameters */
-	int processesAmount = 1;
-	int maxSimultaneousProcesses = PROCESS_TABLE_MAX_SIZE;
-	int maxSeconds = 1;
-	int forkIntervalMs = 0;
-	bool forkIntervalEnabled = false;
-
 	/* Process options */
 	while ((opt = getopt(argc, argv, optstr)) != -1) {
 		switch (opt) {
@@ -156,6 +178,7 @@ int main(int argc, char** argv) {
 			}
 	}
 
+	srand(getpid());
 	/* Set up message queue */
 	int messageQueueId;
 	key_t key;
@@ -178,8 +201,20 @@ int main(int argc, char** argv) {
 	for (int i = 0; i < PROCESS_TABLE_MAX_SIZE; i++) {
 		processTable[i] = emptyPcb;
 	}
-	int processIndexToMessage = 0;
-	int totalMessagesSent = 0;
+
+	/* Set up scheduler queues */
+	ProcessQueue queues[QUEUE_LEVELS];
+	int queueQuantumSeconds = 0;
+	int queueQuantumNano = ONE_BILLION / 100;
+	for (int i = 0; i < QUEUE_LEVELS; i++) {
+		/* Initialize all indexes in queues with -1 to indicate unoccupied */
+		queues[i] = { new int[PROCESS_TABLE_MAX_SIZE], 0, -1, queueQuantumSeconds, queueQuantumNano, 0, PROCESS_TABLE_MAX_SIZE };
+		for (int j = 0; j < PROCESS_TABLE_MAX_SIZE; j++) {
+			queues[i].pcbTableEntry[j] = -1;
+		}
+		/* doubles queue quantum duration */
+		addToClock(queueQuantumSeconds, queueQuantumNano, queueQuantumSeconds, queueQuantumNano);
+	}
 
 	/* Set up shared memory & attach */
 	sharedMemoryId = shmget(SHMKEY, BUFFER_SIZE, 0777 | IPC_CREAT);
@@ -204,33 +239,47 @@ int main(int argc, char** argv) {
 	int readyToForkSeconds = 0;
 	int readyToForkNano = 0;
 
-	/* Set up failsafe that kills the program and its children after 60 seconds */
+	/* Maximum time interval between forking children */
+	int maxTimeBetweenForkSeconds = 0;
+	int maxTimeBetweenForkNano = ONE_BILLION / 5;
+
+	/* Set up failsafe that kills the program and its children after 3 (real life) seconds */
 	signal(SIGALRM, handleFailsafeSignal);
-	alarm(60);
+	alarm(3);
 	signal(SIGINT, handleFailsafeSignal);
 
 	int instancesRunning = 0;
-	int totalInstancesToLaunch = processesAmount;
+	int totalInstancesToLaunch = 100;
+
+	int instancesTerminated = 0;
+
 	while (totalInstancesToLaunch > 0 || instancesRunning > 0) {
 		pid_t childPid = -1;
 		bool shouldAddToProcessTable = false;
 
 		/* Determining if child should be created */
-		bool shouldFork = totalInstancesToLaunch > 0 && instancesRunning < maxSimultaneousProcesses;
-		bool readyToFork = !forkIntervalEnabled || hasTimePassed(sharedClock[0], sharedClock[1], readyToForkSeconds, readyToForkNano);
+		bool shouldFork = totalInstancesToLaunch > 0 && instancesRunning < PROCESS_TABLE_MAX_SIZE;
+		bool readyToFork = hasTimePassed(sharedClock[0], sharedClock[1], readyToForkSeconds, readyToForkNano);
 		if (shouldFork && readyToFork) {
+			
 			/* Creating child */
 			totalInstancesToLaunch--;
 			instancesRunning++;
 			shouldAddToProcessTable = true;
 
-			if (forkIntervalEnabled) {
-				readyToForkSeconds = sharedClock[0];
-				readyToForkNano = sharedClock[1];
-				addToClock(readyToForkSeconds, readyToForkNano, intervalSeconds, intervalNano);
-			}
+			readyToForkSeconds = sharedClock[0];
+			readyToForkNano = sharedClock[1];
+
+			/* Uniformly deciding interval between next fork */
+			float maxTimeBetweenForkSecondsFloat = maxTimeBetweenForkSeconds + (float) maxTimeBetweenForkNano / ONE_BILLION;
+			float timeBetweenForkSecondsFloat = randFloat(maxTimeBetweenForkSecondsFloat);
+			/* truncates decimal */
+			int timeBetweenForkSeconds = timeBetweenForkSecondsFloat;
+			int timeBetweenForkNano = (timeBetweenForkSecondsFloat - timeBetweenForkSeconds) * ONE_BILLION;
+			addToClock(readyToForkSeconds, readyToForkNano, timeBetweenForkSeconds, timeBetweenForkNano);
 
 			childPid = fork();
+
 		}
 
 		/* Child process - launches worker */
@@ -241,6 +290,12 @@ int main(int argc, char** argv) {
 			exit(1);
 			/* Parent process - waits for children to terminate */
 		} else {
+			/*If nothing to do*/
+			if (instancesRunning == 0) {
+				printfConsoleAndFile("OSS: Nothing to do, incrementing clock by 10 ms\n");
+				addToClock(sharedClock[0], sharedClock[1], 0, ONE_BILLION / 100);
+				continue;
+			}
 			/* Adds child process to table if one was forked this iteration */
 			if (shouldAddToProcessTable) {
 				int index = findUnoccupiedProcessTableIndex();
@@ -249,6 +304,7 @@ int main(int argc, char** argv) {
 				}
 				PCB newPcb = { true, childPid, sharedClock[0], sharedClock[1] };
 				processTable[index] = newPcb;
+				queuePush(index, queues[0]);
 			}
 
 			/* Printing PCB table */
@@ -261,19 +317,41 @@ int main(int argc, char** argv) {
 					const char* tabIfNanosecondsIsZero = processTable[i].startNano == 0 ? "\t" : "";
 					printfConsoleAndFile("%d\t%s\t\t%d\t\t%d\t\t%d\t%s%d\n", entry, isOccupied, processTable[i].pid, processTable[i].startSeconds, processTable[i].startNano, tabIfNanosecondsIsZero, processTable[i].messagesSent);
 				}
+
+				/* Printing queues*/
+				for (int i = 0; i < QUEUE_LEVELS; i++) {
+					printfConsoleAndFile("q%d:", i);
+					for (int j = 0; j < queues[i].currentSize; j++) {
+						int idx = (queues[i].front + j) % PROCESS_TABLE_MAX_SIZE;
+						printfConsoleAndFile(" %d", queues[i].pcbTableEntry[idx]);
+						if (idx == queues[i].back) {
+							break;
+						}
+					}
+					printfConsoleAndFile("\n");
+				}
 			}
 
-			/* Finds process to message, then sends message */
-			processIndexToMessage = findNextProcessInTable(processIndexToMessage);
+			/* Finds next process to execute, then sends message */
+			int processIndexToExecute = -1;
+			int currentQueueLevel = 0;
+			/* Starts from highest priority to find a queue that is not empty, then pops it */
+			for (int i = 0; i < QUEUE_LEVELS; i++) {
+				if (queues[i].currentSize > 0) {
+					processIndexToExecute = queuePop(queues[i]);
+					currentQueueLevel = i;
+					break;
+				}
+			}
 
-			if (processIndexToMessage != -1) {
+			if (processIndexToExecute != -1) {
 				/* Set up and send message to child */
-				long processPidToMessage = processTable[processIndexToMessage].pid;
+				long processPidToMessage = processTable[processIndexToExecute].pid;
 				MessageBuffer messageToSend;
 				messageToSend.messageType = processPidToMessage;
-				messageToSend.value = 1;
+				int quantum = queues[currentQueueLevel].quantumNano;
+				messageToSend.value = quantum;
 
-				printfConsoleAndFile("OSS: Sending message to worker %d (PID: %ld) at time %d:%d\n", processIndexToMessage, processPidToMessage, sharedClock[0], sharedClock[1]);
 				if (msgsnd(messageQueueId, &messageToSend, sizeof(MessageBuffer) - sizeof(long), 0) == -1) {
 					perror("OSS: Fatal error, msgsnd to child failed, terminating...\n");
 					cleanUpSharedMemory();
@@ -281,11 +359,8 @@ int main(int argc, char** argv) {
 					msgctl(messageQueueId, IPC_RMID, NULL);
 					exit(1);
 				}
-				processTable[processIndexToMessage].messagesSent++;
-				totalMessagesSent++;
 
 				/* Receive message from child and handle it */
-				printfConsoleAndFile("OSS: Receiving message from worker %d (PID: %ld) at time %d:%d\n", processIndexToMessage, processPidToMessage, sharedClock[0], sharedClock[1]);
 				MessageBuffer messageReceived;
 				if (msgrcv(messageQueueId, &messageReceived, sizeof(MessageBuffer), getpid(), 0) == -1) {
 					perror("OSS: Fatal error, msgrcv from child failed, terminating...\n");
@@ -294,22 +369,37 @@ int main(int argc, char** argv) {
 					msgctl(messageQueueId, IPC_RMID, NULL);
 					exit(1);
 				}
-
-				if (messageReceived.value == 0) {
-					printfConsoleAndFile("OSS: Worker %d (PID: %ld) is planning to terminate\n", processIndexToMessage, processPidToMessage);
+				int childExecutionTime = messageReceived.value;
+				/* Terminated */
+				if (childExecutionTime < 0) {
+					printfConsoleAndFile("OSS: Worker %d (PID: %ld) is planning to terminate\n", processIndexToExecute, processPidToMessage);
 					wait(0);
 					removePidFromProcessTable(processPidToMessage);
 					instancesRunning--;
+					addToClock(sharedClock[0], sharedClock[1], 0, -childExecutionTime);
+				}
+				else {
+					/* Blocked by I/O event */
+					if (childExecutionTime < quantum) {
+						printfConsoleAndFile("OSS: Worker %d (PID: %ld) did not use full quantum and was blocked\n", processIndexToExecute, processPidToMessage);
+						/* TODO */
+						queuePush(processIndexToExecute, queues[0]);
+					}
+					/* Used full quantum */
+					else {
+						printfConsoleAndFile("OSS: Worker %d (PID: %ld) executed for full quantum\n", processIndexToExecute, processPidToMessage);
+						/* Add to next/lowest queue */
+						int maxQueueLevel = QUEUE_LEVELS - 1;
+						int nextQueueLevel = currentQueueLevel == maxQueueLevel ? currentQueueLevel : currentQueueLevel + 1;
+						queuePush(processIndexToExecute, queues[nextQueueLevel]);
+					}
+					addToClock(sharedClock[0], sharedClock[1], 0, messageReceived.value);
 				}
 			}
-
-			/* Quarter of a second divided by the amount of currently running children. Ternary prevents dividing by 0 errors */
-			int NANO_SECONDS_TO_ADD_EACH_LOOP = instancesRunning > 0 ? ONE_BILLION / 4 / instancesRunning : ONE_BILLION / 4;
-			addToClock(sharedClock[0], sharedClock[1], 0, NANO_SECONDS_TO_ADD_EACH_LOOP);
 		}
 	}
 
-	printfConsoleAndFile("OSS: All child processes have been executed and are finished.\nTotal child processes launched: %d\nTotal messages sent: %d\n", processesAmount, totalMessagesSent);
+	printf("OSS: Finished\n");
 	cleanUpSharedMemory();
 	closeLogFileIfOpen();
 	msgctl(messageQueueId, IPC_RMID, NULL);
