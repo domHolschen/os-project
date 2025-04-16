@@ -178,6 +178,15 @@ int main(int argc, char** argv) {
 			}
 	}
 
+	/* Open log file */
+	string systemCall = "touch log.txt";
+	system(systemCall.c_str());
+	logFile = fopen("log.txt", "w");
+	if (!logFile) {
+		perror("OSS: Fatal error opening log file, terminating...\n");
+		exit(1);
+	}
+
 	srand(getpid());
 	/* Set up message queue */
 	int messageQueueId;
@@ -250,6 +259,7 @@ int main(int argc, char** argv) {
 
 	/* Timers for statistics */
 
+
 	/* Set up failsafe that kills the program and its children after 3 (real life) seconds */
 	signal(SIGALRM, handleFailsafeSignal);
 	alarm(3);
@@ -307,6 +317,7 @@ int main(int argc, char** argv) {
 				PCB newPcb = { true, childPid, sharedClock[0], sharedClock[1] };
 				processTable[index] = newPcb;
 				queuePush(index, queues[0]);
+				printfConsoleAndFile("OSS: Worker %d (PID %d) forked and added to queue 0\n", index, childPid);
 			}
 
 			/* Printing PCB table */
@@ -351,10 +362,12 @@ int main(int argc, char** argv) {
 						blockedQueue[i] = -1;
 						instancesBlocked--;
 						queuePush(processIndex, queues[0]);
-						printfConsoleAndFile("OSS: Worker %d unblocked\n", processIndex);
+
+						int timeUnblockingNano = ONE_BILLION / 1000;
+						printfConsoleAndFile("OSS: Worker %d (PID: %ld) unblocked (spent %d ns)\n", processIndex, blockedProcess.pid, timeUnblockingNano);
 
 						/* Add 1ms to the clock */
-						addToClock(sharedClock[0], sharedClock[1], 0, ONE_BILLION / 1000);
+						addToClock(sharedClock[0], sharedClock[1], 0, timeUnblockingNano);
 					}
 				}
 			}
@@ -406,7 +419,7 @@ int main(int argc, char** argv) {
 				int childExecutionTime = messageReceived.value;
 				/* Terminated */
 				if (childExecutionTime < 0) {
-					printfConsoleAndFile("OSS: Worker %d (PID: %ld) is planning to terminate\n", processIndexToExecute, processPidToMessage);
+					printfConsoleAndFile("OSS: Worker %d (PID: %ld) is planning to terminate (ran for %d ns)\n", processIndexToExecute, processPidToMessage, -childExecutionTime);
 					wait(0);
 					removePidFromProcessTable(processPidToMessage);
 					instancesRunning--;
@@ -415,7 +428,7 @@ int main(int argc, char** argv) {
 				else {
 					/* Blocked by I/O event */
 					if (childExecutionTime < quantum) {
-						printfConsoleAndFile("OSS: Worker %d (PID: %ld) did not use full quantum and was blocked\n", processIndexToExecute, processPidToMessage);
+						printfConsoleAndFile("OSS: Worker %d (PID: %ld) is blocked (ran for %d ns)\n", processIndexToExecute, processPidToMessage, childExecutionTime);
 						instancesBlocked++;
 						processTable[processIndexToExecute].blocked = true;
 						processTable[processIndexToExecute].eventUnblockSeconds = rand() % 6;
@@ -429,7 +442,7 @@ int main(int argc, char** argv) {
 					}
 					/* Used full quantum */
 					else {
-						printfConsoleAndFile("OSS: Worker %d (PID: %ld) executed for full quantum\n", processIndexToExecute, processPidToMessage);
+						printfConsoleAndFile("OSS: Worker %d (PID: %ld) executed for full quantum (ran for %d ns)\n", processIndexToExecute, processPidToMessage, childExecutionTime);
 						/* Add to next/lowest queue */
 						int maxQueueLevel = QUEUE_LEVELS - 1;
 						int nextQueueLevel = currentQueueLevel == maxQueueLevel ? currentQueueLevel : currentQueueLevel + 1;
