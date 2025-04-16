@@ -14,7 +14,7 @@ void addToClock(int& seconds, int& nano, int secondsToAdd, int nanoToAdd) {
 	}
 	else if (nano < 0) {
 		seconds -= 1;
-		nano = nano % ONE_BILLION;
+		nano = nano % ONE_BILLION * -1;
 	}
 }
 

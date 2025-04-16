@@ -20,15 +20,15 @@ const int QUEUE_LEVELS = 3;
 const int ONE_BILLION = 1000000000;
 const int MAX_TIME_BETWEEN_FORK_NANO = ONE_BILLION - 1;
 const int MAX_TIME_BETWEEN_FORK_SECS = 1;
+const int PROCESSES_AMOUNT = 100;
 
 struct PCB {
 	bool occupied; // either true or false
 	pid_t pid; // process id of this child
 	int startSeconds; // time when it was forked
 	int startNano; // time when it was forked
-	int messagesSent; // number of messages sent to the process
-	int serviceTimeSeconds; // total seconds it has been "scheduled"
-	int serviceTimeNano; // total nanoseconds it has been "scheduled"
+	int lastTimePreemptedSeconds;
+	int lastTimePreemptedNano;
 	int eventUnblockSeconds; // when does its event happen?
 	int eventUnblockNano; // when does its event happen?
 	bool blocked; // is this process waiting on event?
@@ -118,6 +118,11 @@ int queuePop(ProcessQueue& queue) {
 /* Get a float between 0 and max */
 float randFloat(float max) {
 	return static_cast<float>(rand()) / RAND_MAX * max;
+}
+
+/* Converts seconds + nano into a long representing seconds */
+float timerAsFloat(int seconds, int nano) {
+	return (float)seconds + ((float)nano / (float)ONE_BILLION);
 }
 
 /* Acts as a printf statement that writes to both the console and a file if defined */
@@ -258,7 +263,14 @@ int main(int argc, char** argv) {
 	int maxTimeBetweenForkNano = ONE_BILLION / 5;
 
 	/* Timers for statistics */
+	int timeOssIdleSeconds = 0;
+	int timeOssIdleNano = 0;
 
+	int totalTimeBlockedSeconds = 0;
+	int totalTimeBlockedNano = 0;
+
+	int totalWaitTimeSeconds = 0;
+	int totalWaitTimeNano = 0;
 
 	/* Set up failsafe that kills the program and its children after 3 (real life) seconds */
 	signal(SIGALRM, handleFailsafeSignal);
@@ -267,7 +279,7 @@ int main(int argc, char** argv) {
 
 	int instancesRunning = 0;
 	int instancesBlocked = 0;
-	int totalInstancesToLaunch = 100;
+	int totalInstancesToLaunch = PROCESSES_AMOUNT;
 
 	int instancesTerminated = 0;
 
@@ -323,12 +335,11 @@ int main(int argc, char** argv) {
 			/* Printing PCB table */
 			if (hasTimePassed(sharedClock[0], sharedClock[1], pcbTimerSeconds, pcbTimerNano)) {
 				addToClock(pcbTimerSeconds, pcbTimerNano, 0, ONE_BILLION / 2);
-				printfConsoleAndFile("Process table:\nEntry\tOccupied?\tPID\t\tStart(s)\tStart(ns)\tMessages Sent\n");
+				printfConsoleAndFile("Process table:\nEntry\tOccupied?\tPID\t\tStart(s)\tStart(ns)\n");
 				for (int i = 0; i < PROCESS_TABLE_MAX_SIZE; i++) {
 					int entry = i;
 					const char* isOccupied = processTable[i].occupied ? "true" : "false";
-					const char* tabIfNanosecondsIsZero = processTable[i].startNano == 0 ? "\t" : "";
-					printfConsoleAndFile("%d\t%s\t\t%d\t\t%d\t\t%d\t%s%d\n", entry, isOccupied, processTable[i].pid, processTable[i].startSeconds, processTable[i].startNano, tabIfNanosecondsIsZero, processTable[i].messagesSent);
+					printfConsoleAndFile("%d\t%s\t\t%d\t\t%d\t\t%d\t\n", entry, isOccupied, processTable[i].pid, processTable[i].startSeconds, processTable[i].startNano);
 				}
 
 				/* Printing queues*/
@@ -363,8 +374,12 @@ int main(int argc, char** argv) {
 						instancesBlocked--;
 						queuePush(processIndex, queues[0]);
 
+						/* update these timers to calculate average wait time (since process is ready now) */
+						blockedProcess.lastTimePreemptedSeconds = sharedClock[0];
+						blockedProcess.lastTimePreemptedNano = sharedClock[1];
+
 						int timeUnblockingNano = ONE_BILLION / 1000;
-						printfConsoleAndFile("OSS: Worker %d (PID: %ld) unblocked (spent %d ns)\n", processIndex, blockedProcess.pid, timeUnblockingNano);
+						printfConsoleAndFile("OSS: Worker %d (PID: %ld) unblocked (%d ns spent by scheduler)\n", processIndex, blockedProcess.pid, timeUnblockingNano);
 
 						/* Add 1ms to the clock */
 						addToClock(sharedClock[0], sharedClock[1], 0, timeUnblockingNano);
@@ -375,7 +390,9 @@ int main(int argc, char** argv) {
 			/*If nothing to do*/
 			if (instancesRunning - instancesBlocked == 0) {
 				printfConsoleAndFile("OSS: Nothing to do, incrementing clock by 100 ms\n");
-				addToClock(sharedClock[0], sharedClock[1], 0, ONE_BILLION / 10);
+				int timeToWait = ONE_BILLION / 10;
+				addToClock(sharedClock[0], sharedClock[1], 0, timeToWait);
+				addToClock(timeOssIdleSeconds, timeOssIdleNano, 0, timeToWait);
 				continue;
 			}
 
@@ -392,6 +409,19 @@ int main(int argc, char** argv) {
 			}
 
 			if (processIndexToExecute != -1) {
+				/* Gathering data for calculating average wait time later */
+				int timeStartedWaitingSeconds = processTable[processIndexToExecute].startSeconds;
+				int timeStartedWaitingNano = processTable[processIndexToExecute].startNano;
+				/* if it has already started before and it is being preempted */
+				if (processTable[processIndexToExecute].lastTimePreemptedSeconds != 0 || processTable[processIndexToExecute].lastTimePreemptedSeconds != 0) {
+					timeStartedWaitingSeconds = processTable[processIndexToExecute].lastTimePreemptedSeconds;
+					timeStartedWaitingNano = processTable[processIndexToExecute].lastTimePreemptedNano;
+				}
+				int timeWaitingSeconds = sharedClock[0];
+				int timeWaitingNano = sharedClock[1];
+				addToClock(timeWaitingSeconds, timeWaitingNano, -timeStartedWaitingSeconds, -timeStartedWaitingNano);
+				addToClock(totalWaitTimeSeconds, totalWaitTimeNano, timeWaitingSeconds, timeWaitingNano);
+
 				/* Set up and send message to child */
 				long processPidToMessage = processTable[processIndexToExecute].pid;
 				MessageBuffer messageToSend;
@@ -431,8 +461,19 @@ int main(int argc, char** argv) {
 						printfConsoleAndFile("OSS: Worker %d (PID: %ld) is blocked (ran for %d ns)\n", processIndexToExecute, processPidToMessage, childExecutionTime);
 						instancesBlocked++;
 						processTable[processIndexToExecute].blocked = true;
-						processTable[processIndexToExecute].eventUnblockSeconds = rand() % 6;
-						processTable[processIndexToExecute].eventUnblockNano = rand() % 1001;
+
+						int timeBlockedSeconds = rand() % 6;
+						int timeBlockedNano = rand() % 1001;
+						/* for gathering metrics */
+						addToClock(totalTimeBlockedSeconds, totalTimeBlockedNano, timeBlockedSeconds, timeBlockedNano);
+
+						int timeToUnblockSeconds = sharedClock[0];
+						int timeToUnblockNano = sharedClock[1];
+						/* sets time that they will unblock */
+						addToClock(timeToUnblockSeconds, timeToUnblockNano, timeBlockedSeconds, timeBlockedNano);
+
+						processTable[processIndexToExecute].eventUnblockSeconds = timeToUnblockSeconds;
+						processTable[processIndexToExecute].eventUnblockNano = timeToUnblockNano;
 						for (int i = 0; i < PROCESS_TABLE_MAX_SIZE; i++) {
 							if (blockedQueue[i] == -1) {
 								blockedQueue[i] = processIndexToExecute;
@@ -443,6 +484,9 @@ int main(int argc, char** argv) {
 					/* Used full quantum */
 					else {
 						printfConsoleAndFile("OSS: Worker %d (PID: %ld) executed for full quantum (ran for %d ns)\n", processIndexToExecute, processPidToMessage, childExecutionTime);
+						processTable[processIndexToExecute].lastTimePreemptedSeconds = sharedClock[0];
+						processTable[processIndexToExecute].lastTimePreemptedNano = sharedClock[1];
+
 						/* Add to next/lowest queue */
 						int maxQueueLevel = QUEUE_LEVELS - 1;
 						int nextQueueLevel = currentQueueLevel == maxQueueLevel ? currentQueueLevel : currentQueueLevel + 1;
@@ -454,7 +498,14 @@ int main(int argc, char** argv) {
 		}
 	}
 
-	printf("OSS: Finished\n");
+	float timeElapsed = timerAsFloat(sharedClock[0], sharedClock[1]);
+	float timeOssIdle = timerAsFloat(timeOssIdleSeconds, timeOssIdleNano);
+	float cpuUtilizationAsPercent = (float)100 * (timeElapsed - timeOssIdle) / timeElapsed;
+	printfConsoleAndFile("OSS: Finished.\nTime elapsed: %.2fs\nTime OSS was idle: %.2fs\nCPU utilization: %.2f %\n", timeElapsed, timeOssIdle, cpuUtilizationAsPercent);
+	float averageTimeBlocked = timerAsFloat(totalTimeBlockedSeconds, totalTimeBlockedNano) / PROCESSES_AMOUNT;
+	float averageWaitTime = timerAsFloat(totalWaitTimeSeconds, totalTimeBlockedNano) / PROCESSES_AMOUNT;
+	printfConsoleAndFile("Total processes: %d\nAverage time blocked: %.2fs\nAverage wait time: %.2fs\n", PROCESSES_AMOUNT, averageTimeBlocked, averageWaitTime);
+
 	cleanUpSharedMemory();
 	closeLogFileIfOpen();
 	msgctl(messageQueueId, IPC_RMID, NULL);
