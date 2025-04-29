@@ -3,8 +3,6 @@
 
 /* Takes in seconds + nano by reference and increments them based 3rd and 4th parameters*/
 void addToClock(int& seconds, int& nano, int secondsToAdd, int nanoToAdd) {
-	const int ONE_BILLION = 1000000000;
-
 	seconds += secondsToAdd;
 	nano += nanoToAdd;
 

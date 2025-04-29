@@ -1,9 +1,10 @@
 #include "resourceUtils.h"
 #include <cstdio>
 #include <array>
+using namespace std;
 
 array<Descriptor, RESOURCE_TYPES_AMOUNT> createResources() {
-    Descriptor resources[RESOURCE_TYPES_AMOUNT];
+    array<Descriptor, RESOURCE_TYPES_AMOUNT> resources;
     for (int i = 0; i < RESOURCE_TYPES_AMOUNT; i++) {
         resources[i].totalInstances = MAX_PROCESSES_AMOUNT;
         resources[i].availableInstances = MAX_PROCESSES_AMOUNT;
@@ -38,7 +39,7 @@ bool freeFromProcess(Descriptor resource, int processId) {
  /* Removes everything associated with a process. Used for when the process is terminated */
 void freeProcess(Descriptor resources[], int processId) {
     if (processId < 0 || processId >= MAX_PROCESSES_AMOUNT) return;
-    for (int i; i < RESOURCE_TYPES_AMOUNT, i++) {
+    for (int i; i < RESOURCE_TYPES_AMOUNT; i++) {
         int resourcesFreed = resources[i].allocated[processId];
         resources[i].availableInstances += resourcesFreed;
         resources[i].requested[processId] = 0;

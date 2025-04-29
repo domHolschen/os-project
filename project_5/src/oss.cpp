@@ -17,7 +17,6 @@ using namespace std;
 #define SHMKEY 9021011
 #define BUFFER_SIZE sizeof(int) * 2
 const int PROCESS_TABLE_MAX_SIZE = 18;
-const int ONE_BILLION = 1000000000;
 
 struct PCB {
 	bool occupied; // either true or false
@@ -222,7 +221,8 @@ int main(int argc, char** argv) {
 	int intervalNano = (forkIntervalMs % 1000) * 1000000;
 
 	/* Create resources structure */
-	Descriptor[RESOURCE_TYPES_AMOUNT] resources = createResources();
+	array<Descriptor, RESOURCE_TYPES_AMOUNT> resourcesArray = createResources();
+	Descriptor* resources = resourcesArray.data();
 
 	/* Set up failsafe that kills the program and its children after 60 seconds */
 	signal(SIGALRM, handleFailsafeSignal);
@@ -307,7 +307,7 @@ int main(int argc, char** argv) {
 				}
 				/* Request */
 				else if (messageReceived.value < RESOURCE_TYPES_AMOUNT) {
-					bool successful = allocateToProcess(resource[messageReceived.value], i);
+					bool successful = allocateToProcess(resources[messageReceived.value], i);
 					if (successful) {
 						long processPidToMessage = processTable[i].pid;
 						MessageBuffer messageToSend;
@@ -330,7 +330,6 @@ int main(int argc, char** argv) {
 					freeFromProcess(resources[resourceId],i);
 				}
 			}
-
 			addToClock(sharedClock[0], sharedClock[1], 0, ONE_BILLION / 1000);
 		}
 	}

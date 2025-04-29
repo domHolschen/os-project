@@ -39,13 +39,13 @@ bool isValidArgument(const char* arg) {
 
 /* Returns an int based on what the process will do */
 int makeDecision(int resourceAllocatedAmount) {
-	int random = rand() % 200
+	int random = rand() % 200;
 	/* Terminate */
 	if (random == 0) {
 		return 2;
 	}
 	/* Free a resource, only if able, but forced to free if it is maxed out */
-	if ((random <= 40 && resourceAllocatedAmount > 0) || resourceAllocatedAmount >= RESOURCE_INSTANCES_AMOUNT)) {
+	if ((random <= 40 && resourceAllocatedAmount > 0) || resourceAllocatedAmount >= RESOURCE_INSTANCES_AMOUNT) {
 		return 1;
 	}
 	/* Request a resource */
