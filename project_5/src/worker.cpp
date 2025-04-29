@@ -59,9 +59,12 @@ void printProcessDetails(int simClockS, int simClockN, int termTimeS, int termTi
 
 /* Main method, defines the terminal command */
 int main(int argc, char** argv) {
+	/* Set random seed */
+	srand(getpid());
+
 	/* Interval for worker to decide what it will do */
 	int nextDecisionIntervalNano = 0;
-	if (isValidArgument(argv[1])) {
+	if (argc > 1 && isValidArgument(argv[1])) {
 		nextDecisionIntervalNano = atoi(argv[1]) * 1000;
 	}
 	else {
@@ -97,6 +100,10 @@ int main(int argc, char** argv) {
 		exit(1);
 	}
 	int* sharedClock = (int*)(shmat(sharedMemoryId, 0, 0));
+	if (sharedClock == (void*)-1) {
+		perror("WORKER: Failed to attach shared memory");
+		exit(1);
+	}
 
 	int nextDecisionSeconds = 0;
 	int nextDecisionNano = nextDecisionIntervalNano;
@@ -115,13 +122,14 @@ int main(int argc, char** argv) {
 			resourceIndex = rand() % 5;
 			decisionCode = makeDecision(allocatedResources[resourceIndex]);
 			addToClock(nextDecisionSeconds, nextDecisionNano, 0, nextDecisionIntervalNano);
+			printf("WORKER: Making decision %d\n", decisionCode);
 		}
 
+		MessageBuffer messageToSend;
+		messageToSend.messageType = getpid();
 		/* Request a resource*/
 		if (decisionCode == 0) {
 			/* Send message back to parent to request resource */
-			MessageBuffer messageToSend;
-			messageToSend.messageType = getppid();
 			messageToSend.value = resourceIndex;
 			if (msgsnd(messageQueueId, &messageToSend, sizeof(MessageBuffer) - sizeof(long), 0) == -1) {
 				perror("OSS: Fatal error, msgsnd to parent failed, terminating...\n");
@@ -130,7 +138,7 @@ int main(int argc, char** argv) {
 
 			/* Wait to receive a message from oss that the resource was granted */
 			MessageBuffer messageReceived;
-			if (msgsnd(messageQueueId, &messageToSend, sizeof(MessageBuffer) - sizeof(long), 0) == -1) {
+			if (msgrcv(messageQueueId, &messageToSend, sizeof(MessageBuffer) - sizeof(long), getpid(), 0) == -1) {
 				perror("OSS: Fatal error, msgsnd to parent failed, terminating...\n");
 				exit(1);
 			}
@@ -138,8 +146,6 @@ int main(int argc, char** argv) {
 		/* Free a resource*/
 		if (decisionCode == 1) {
 			/* Send message back to parent to free resource */
-			MessageBuffer messageToSend;
-			messageToSend.messageType = getppid();
 			messageToSend.value = resourceIndex + RESOURCE_TYPES_AMOUNT;
 			if (msgsnd(messageQueueId, &messageToSend, sizeof(MessageBuffer) - sizeof(long), 0) == -1) {
 				perror("OSS: Fatal error, msgsnd to parent failed, terminating...\n");
@@ -149,8 +155,6 @@ int main(int argc, char** argv) {
 		/* Termination */
 		if (decisionCode == 2) {
 			/* Send message back to parent to terminate */
-			MessageBuffer messageToSend;
-			messageToSend.messageType = getppid();
 			messageToSend.value = -1;
 			willTerminate = true;
 			if (msgsnd(messageQueueId, &messageToSend, sizeof(MessageBuffer) - sizeof(long), 0) == -1) {

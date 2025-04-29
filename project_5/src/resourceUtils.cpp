@@ -37,7 +37,7 @@ bool freeFromProcess(Descriptor resource, int processId) {
     return true;
 }
  /* Removes everything associated with a process. Used for when the process is terminated */
-void freeProcess(Descriptor resources[], int processId) {
+void freeProcess(Descriptor* resources, int processId) {
     if (processId < 0 || processId >= MAX_PROCESSES_AMOUNT) return;
     for (int i; i < RESOURCE_TYPES_AMOUNT; i++) {
         int resourcesFreed = resources[i].allocated[processId];
