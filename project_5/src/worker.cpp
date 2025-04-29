@@ -8,6 +8,7 @@
 #include<sys/shm.h>
 #include<sys/msg.h>
 #include "clockUtils.h"
+#include "resourceUtils.h"
 using namespace std;
 
 #define SHMKEY 9021011
@@ -36,6 +37,21 @@ bool isValidArgument(const char* arg) {
 	return argAsInt > 0;
 }
 
+/* Returns an int based on what the process will do */
+int makeDecision(int resourceAllocatedAmount) {
+	int random = rand() % 200
+	/* Terminate */
+	if (random == 0) {
+		return 2;
+	}
+	/* Free a resource, only if able, but forced to free if it is maxed out */
+	if ((random <= 40 && resourceAllocatedAmount > 0) || resourceAllocatedAmount >= RESOURCE_INSTANCES_AMOUNT)) {
+		return 1;
+	}
+	/* Request a resource */
+	return 0;
+}
+
 /* Prepared printf statement that displays clock & process details */
 void printProcessDetails(int simClockS, int simClockN, int termTimeS, int termTimeN) {
 	printf("WORKER: PID:%d PPID:%d Clock(s):%d Clock(ns):%d Terminate(s):%d Terminate(ns):%d\n", getpid(), getppid(), simClockS, simClockN, termTimeS, termTimeN);
@@ -43,20 +59,20 @@ void printProcessDetails(int simClockS, int simClockN, int termTimeS, int termTi
 
 /* Main method, defines the terminal command */
 int main(int argc, char** argv) {
-	int terminateSeconds = 0;
-	int terminateNano = 0;
+	/* Interval for worker to decide what it will do */
+	int nextDecisionIntervalNano = 0;
 	if (isValidArgument(argv[1])) {
-		terminateSeconds = atoi(argv[1]);
-	} else {
-		terminateSeconds = 1;
-		printf("WORKER: Invalid or missing seconds argument, defaulting to 1\n");
-	}
-	if (isValidArgument(argv[2])) {
-		terminateNano = atoi(argv[2]);
+		nextDecisionIntervalNano = atoi(argv[1]) * 1000;
 	}
 	else {
-		terminateNano = 1;
-		printf("WORKER: Invalid or missing nanoseconds argument, defaulting to 1\n");
+		nextDecisionIntervalNano = ONE_BILLION / 1000;
+		printf("WORKER: Invalid or missing interval argument, defaulting to 1 ms\n");
+	}
+
+	/* Set up resources */
+	int allocatedResources[RESOURCE_TYPES_AMOUNT];
+	for (int i = 0; i < RESOURCE_TYPES_AMOUNT; i++) {
+		allocatedResources[i] = 0;
 	}
 
 	/* Set up message queue */
@@ -82,37 +98,68 @@ int main(int argc, char** argv) {
 	}
 	int* sharedClock = (int*)(shmat(sharedMemoryId, 0, 0));
 
-	/* Adds simulated clock's time to the passed in duration to get the time to terminate */
-	addToClock(terminateSeconds, terminateNano, sharedClock[0], sharedClock[1]);
-
-	printProcessDetails(sharedClock[0], sharedClock[1], terminateSeconds, terminateNano);
-	printf("WORKER: Just starting...\n");
-	int previousSecond = sharedClock[0];
-	int iterationsElapsed = 1;
+	int nextDecisionSeconds = 0;
+	int nextDecisionNano = nextDecisionIntervalNano;
 	bool willTerminate = false;
 
-	while (!willTerminate) {
-		/* Wait for message from oss (parent) */
-		MessageBuffer messageReceived;
-		if (msgrcv(messageQueueId, &messageReceived, sizeof(MessageBuffer), getpid(), 0) == -1) {
-			perror("WORKER: Fatal error, msgrcv from parent failed, terminating...\n");
-			exit(1);
-		}
-		/* Check clock and print */
-		willTerminate = hasTimePassed(sharedClock[0], sharedClock[1], terminateSeconds, terminateNano);
-		printProcessDetails(sharedClock[0], sharedClock[1], terminateSeconds, terminateNano);
-		printf("WORKER: %d iterations elapsed since starting\n", iterationsElapsed++);
-		/* Send message back to parent whether it will terminate or not */
-		MessageBuffer messageToSend;
-		messageToSend.messageType = getppid();
-		messageToSend.value = willTerminate ? 0 : 1;
+	/* Adds simulated clock's time to the passed in duration to get the time to make a decision */
+	addToClock(nextDecisionSeconds, nextDecisionNano, sharedClock[0], sharedClock[1]);
 
-		if (msgsnd(messageQueueId, &messageToSend, sizeof(MessageBuffer) - sizeof(long), 0) == -1) {
-			perror("OSS: Fatal error, msgsnd to parent failed, terminating...\n");
-			exit(1);
+	printf("WORKER: Just starting...\n");
+
+	while (!willTerminate) {
+		int decisionCode = -1;
+		bool canRequestResource;
+		int resourceIndex;
+		if (hasTimePassed(sharedClock[0], sharedClock[1], nextDecisionSeconds, nextDecisionNano)) {
+			resourceIndex = rand() % 5;
+			decisionCode = makeDecision(allocatedResources[resourceIndex]);
+			addToClock(nextDecisionSeconds, nextDecisionNano, 0, nextDecisionIntervalNano);
+		}
+
+		/* Request a resource*/
+		if (decisionCode == 0) {
+			/* Send message back to parent to request resource */
+			MessageBuffer messageToSend;
+			messageToSend.messageType = getppid();
+			messageToSend.value = resourceIndex;
+			if (msgsnd(messageQueueId, &messageToSend, sizeof(MessageBuffer) - sizeof(long), 0) == -1) {
+				perror("OSS: Fatal error, msgsnd to parent failed, terminating...\n");
+				exit(1);
+			}
+
+			/* Wait to receive a message from oss that the resource was granted */
+			MessageBuffer messageReceived;
+			if (msgsnd(messageQueueId, &messageToSend, sizeof(MessageBuffer) - sizeof(long), 0) == -1) {
+				perror("OSS: Fatal error, msgsnd to parent failed, terminating...\n");
+				exit(1);
+			}
+		}
+		/* Free a resource*/
+		if (decisionCode == 1) {
+			/* Send message back to parent to free resource */
+			MessageBuffer messageToSend;
+			messageToSend.messageType = getppid();
+			messageToSend.value = resourceIndex + RESOURCE_TYPES_AMOUNT;
+			if (msgsnd(messageQueueId, &messageToSend, sizeof(MessageBuffer) - sizeof(long), 0) == -1) {
+				perror("OSS: Fatal error, msgsnd to parent failed, terminating...\n");
+				exit(1);
+			}
+		}
+		/* Termination */
+		if (decisionCode == 2) {
+			/* Send message back to parent to terminate */
+			MessageBuffer messageToSend;
+			messageToSend.messageType = getppid();
+			messageToSend.value = -1;
+			willTerminate = true;
+			if (msgsnd(messageQueueId, &messageToSend, sizeof(MessageBuffer) - sizeof(long), 0) == -1) {
+				perror("OSS: Fatal error, msgsnd to parent failed, terminating...\n");
+				exit(1);
+			}
 		}
 	}
-	printProcessDetails(sharedClock[0], sharedClock[1], terminateSeconds, terminateNano);
+
 	printf("WORKER: Time limit reached, terminating...\n");
 
 	shmdt(sharedClock);

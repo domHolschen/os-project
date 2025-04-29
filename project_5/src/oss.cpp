@@ -11,11 +11,12 @@
 #include<sys/msg.h>
 #include<stdarg.h>
 #include "clockUtils.h"
+#include "resourceUtils.h"
 using namespace std;
 
 #define SHMKEY 9021011
 #define BUFFER_SIZE sizeof(int) * 2
-const int PROCESS_TABLE_MAX_SIZE = 20;
+const int PROCESS_TABLE_MAX_SIZE = 18;
 const int ONE_BILLION = 1000000000;
 
 struct PCB {
@@ -24,6 +25,7 @@ struct PCB {
 	int startSeconds; // time when it was forked
 	int startNano; // time when it was forked
 	int messagesSent; // number of messages sent to the process
+	bool blocked; // if the process is blocked by an unfulfilled request
 };
 struct PCB processTable[PROCESS_TABLE_MAX_SIZE];
 struct MessageBuffer {
@@ -35,11 +37,10 @@ int* sharedClock;
 FILE* logFile = NULL;
 
 void printHelp() {
-	printf("Usage: oss [-h] [-n proc] [-s simul] [-t iter] [-f logfile]\n");
+	printf("Usage: oss [-h] [-n proc] [-s simul] [-i interval] [-f logfile]\n");
 	printf("-h : Print options for the oss tool and exits\n");
 	printf("-n : Total number of processes to run (default: 1)\n");
 	printf("-s : Maximum number of simultaneously running processes. Maximum of %d (default: %d)\n", PROCESS_TABLE_MAX_SIZE, PROCESS_TABLE_MAX_SIZE);
-	printf("-t : Maximum number of seconds that workers will run (default: 1)\n");
 	printf("-i : Interval (in ms) to launch child processes (default: 0)\n");
 	printf("-f : Specify a filename to save a copy of oss's logs to (disabled by default)\n");
 }
@@ -128,7 +129,7 @@ void handleFailsafeSignal(int signal) {
 }
 
 int main(int argc, char** argv) {
-	const char optstr[] = "hn:s:t:i:f:";
+	const char optstr[] = "hn:s:i:f:";
 	char opt;
 
 	/* Default parameters */
@@ -152,9 +153,6 @@ int main(int argc, char** argv) {
 				if (maxSimultaneousProcesses > PROCESS_TABLE_MAX_SIZE) {
 					maxSimultaneousProcesses = PROCESS_TABLE_MAX_SIZE;
 				}
-				break;
-			case 't':
-				maxSeconds = processOptarg(optarg);
 				break;
 			case 'i':
 				forkIntervalMs = processOptarg(optarg);
@@ -223,9 +221,12 @@ int main(int argc, char** argv) {
 	int intervalSeconds = forkIntervalMs / 1000;
 	int intervalNano = (forkIntervalMs % 1000) * 1000000;
 
+	/* Create resources structure */
+	Descriptor[RESOURCE_TYPES_AMOUNT] resources = createResources();
+
 	/* Set up failsafe that kills the program and its children after 60 seconds */
 	signal(SIGALRM, handleFailsafeSignal);
-	alarm(60);
+	alarm(5);
 	signal(SIGINT, handleFailsafeSignal);
 
 	int instancesRunning = 0;
@@ -255,9 +256,8 @@ int main(int argc, char** argv) {
 		/* Child process - launches worker */
 		if (childPid == 0) {
 			string arg0 = "./worker";
-			string arg1 = to_string(rand() % maxSeconds);
-			string arg2 = to_string(rand() % ONE_BILLION);
-			execlp(arg0.c_str(), arg0.c_str(), arg1.c_str(), arg2.c_str(), (char*)0);
+			string arg1 = to_string(rand() % ONE_BILLION);
+			execlp(arg0.c_str(), arg0.c_str(), arg1.c_str(), (char*)0);
 			perror("OSS: Launching worker failed, terminating\n");
 			exit(1);
 			/* Parent process - waits for children to terminate */
@@ -285,48 +285,53 @@ int main(int argc, char** argv) {
 			}
 
 			/* Finds process to message, then sends message */
-			processIndexToMessage = findNextProcessInTable(processIndexToMessage);
-
-			if (processIndexToMessage != -1) {
-				/* Set up and send message to child */
-				long processPidToMessage = processTable[processIndexToMessage].pid;
-				MessageBuffer messageToSend;
-				messageToSend.messageType = processPidToMessage;
-				messageToSend.value = 1;
-
-				printfConsoleAndFile("OSS: Sending message to worker %d (PID: %ld) at time %d:%d\n", processIndexToMessage, processPidToMessage, sharedClock[0], sharedClock[1]);
-				if (msgsnd(messageQueueId, &messageToSend, sizeof(MessageBuffer) - sizeof(long), 0) == -1) {
-					perror("OSS: Fatal error, msgsnd to child failed, terminating...\n");
-					cleanUpSharedMemory();
-					closeLogFileIfOpen();
-					msgctl(messageQueueId, IPC_RMID, NULL);
-					exit(1);
-				}
-				processTable[processIndexToMessage].messagesSent++;
-				totalMessagesSent++;
-
-				/* Receive message from child and handle it */
-				printfConsoleAndFile("OSS: Receiving message from worker %d (PID: %ld) at time %d:%d\n", processIndexToMessage, processPidToMessage, sharedClock[0], sharedClock[1]);
+			for (int i = 0; i < MAX_PROCESSES_AMOUNT; i++) {
 				MessageBuffer messageReceived;
-				if (msgrcv(messageQueueId, &messageReceived, sizeof(MessageBuffer), getpid(), 0) == -1) {
-					perror("OSS: Fatal error, msgrcv from child failed, terminating...\n");
-					cleanUpSharedMemory();
-					closeLogFileIfOpen();
-					msgctl(messageQueueId, IPC_RMID, NULL);
-					exit(1);
+				if (msgrcv(messageQueueId, &messageReceived, sizeof(MessageBuffer), processTable[i].pid, IPC_NOWAIT) == -1) {
+					if (errno == ENOMSG) {
+
+					}
+					else {
+						perror("OSS: Fatal error, msgrcv from child failed, terminating...\n");
+						cleanUpSharedMemory();
+						closeLogFileIfOpen();
+						msgctl(messageQueueId, IPC_RMID, NULL);
+						exit(1);
+					}
 				}
 
-				if (messageReceived.value == 0) {
-					printfConsoleAndFile("OSS: Worker %d (PID: %ld) is planning to terminate\n", processIndexToMessage, processPidToMessage);
-					wait(0);
-					removePidFromProcessTable(processPidToMessage);
-					instancesRunning--;
+				/* Terminate */
+				if (messageReceived.value == -1) {
+					freeProcess(resources, i);
+					removePidFromProcessTable(processTable[i].pid);
+				}
+				/* Request */
+				else if (messageReceived.value < RESOURCE_TYPES_AMOUNT) {
+					bool successful = allocateToProcess(resource[messageReceived.value], i);
+					if (successful) {
+						long processPidToMessage = processTable[i].pid;
+						MessageBuffer messageToSend;
+						messageToSend.messageType = processPidToMessage;
+						messageToSend.value = 1;
+
+						printfConsoleAndFile("OSS: Sending message to worker %d (PID: %ld) at time %d:%d\n", processIndexToMessage, processPidToMessage, sharedClock[0], sharedClock[1]);
+						if (msgsnd(messageQueueId, &messageToSend, sizeof(MessageBuffer) - sizeof(long), 0) == -1) {
+							perror("OSS: Fatal error, msgsnd to child failed, terminating...\n");
+							cleanUpSharedMemory();
+							closeLogFileIfOpen();
+							msgctl(messageQueueId, IPC_RMID, NULL);
+							exit(1);
+						}
+					}
+				}
+				/* Free - freeing should always be successful when received by oss */
+				else {
+					int resourceId = messageReceived.value - RESOURCE_TYPES_AMOUNT;
+					freeFromProcess(resources[resourceId],i);
 				}
 			}
 
-			/* Quarter of a second divided by the amount of currently running children. Ternary prevents dividing by 0 errors */
-			int NANO_SECONDS_TO_ADD_EACH_LOOP = instancesRunning > 0 ? ONE_BILLION / 4 / instancesRunning : ONE_BILLION / 4;
-			addToClock(sharedClock[0], sharedClock[1], 0, NANO_SECONDS_TO_ADD_EACH_LOOP);
+			addToClock(sharedClock[0], sharedClock[1], 0, ONE_BILLION / 1000);
 		}
 	}
 
