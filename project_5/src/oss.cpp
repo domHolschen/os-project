@@ -103,6 +103,10 @@ void printfConsoleAndFile(const char* baseString, ...) {
 
 /* Detaches pointer and clears shared memory at the key */
 void cleanUpSharedMemory() {
+	/* Clear out all messages in queue */
+	MessageBuffer temp;
+	while (msgrcv(messageQueueId, &temp, sizeof(MessageBuffer) - sizeof(long), 0, IPC_NOWAIT) != -1) {
+	}
 	msgctl(messageQueueId, IPC_RMID, NULL);
 
 	shmdt(sharedClock);
@@ -278,29 +282,52 @@ int main(int argc, char** argv) {
 			}
 
 			/* Printing PCB table */
-
-			/*
 			if (hasTimePassed(sharedClock[0], sharedClock[1], pcbTimerSeconds, pcbTimerNano)) {
-				addToClock(pcbTimerSeconds, pcbTimerNano, 0, ONE_BILLION / 2);
-				printfConsoleAndFile("Process table:\nEntry\tOccupied?\tPID\t\tStart(s)\tStart(ns)\tMessages Sent\n");
-				for (int i = 0; i < PROCESS_TABLE_MAX_SIZE; i++) {
-					int entry = i;
+				addToClock(pcbTimerSeconds, pcbTimerNano, 10, ONE_BILLION / 2);
+				printfConsoleAndFile("Process table:\n\tR0\tR1\tR2\tR3\tR4\n");
+				for (int i = 0; i < maxSimultaneousProcesses; i++) {
 					const char* isOccupied = processTable[i].occupied ? "true" : "false";
 					const char* tabIfNanosecondsIsZero = processTable[i].startNano == 0 ? "\t" : "";
-					printfConsoleAndFile("%d\t%s\t\t%d\t\t%d\t\t%d\t%s%d\n", entry, isOccupied, processTable[i].pid, processTable[i].startSeconds, processTable[i].startNano, tabIfNanosecondsIsZero, processTable[i].messagesSent);
+					printfConsoleAndFile("P%d\t%d\t%d\t%d\t%d\t%d\n", i, resources[0].allocated[i], resources[1].allocated[i], resources[2].allocated[i], resources[3].allocated[i], resources[4].allocated[i]);
 				}
 			}
-			*/
+			
+			/* First looks at blocked processes */
+			for (int i = 0; i < MAX_PROCESSES_AMOUNT; i++) {
+				if (!processTable[i].occupied || processTable[i].blocked) {
+					continue;
+				}
+				
+				for (int j = 0; j < RESOURCE_TYPES_AMOUNT; j++) {
+					if (resources[j].requested[i] > 0 && resources[j].availableInstances > 0) {
+						printfConsoleAndFile("OSS: blocked worker %d (PID %d) requested resource %d and is granted\n", i, processTable[i].pid, j);
+						long processPidToMessage = processTable[i].pid;
+						MessageBuffer messageToSend;
+						messageToSend.messageType = processPidToMessage;
+						messageToSend.value = 1;
+						if (msgsnd(messageQueueId, &messageToSend, sizeof(MessageBuffer) - sizeof(long), 0) == -1) {
+							perror("OSS: Fatal error, msgsnd to child failed, terminating...\n");
+							printf("errno: %d\n", errno);
+							cleanUpSharedMemory();
+							closeLogFileIfOpen();
+							msgctl(messageQueueId, IPC_RMID, NULL);
+							exit(1);
+						}
+						resources[j].requested[i]--;
+						allocateToProcess(resources[j], i);
+					}
+				}
+			}
 
 			/* Finds process to message, then sends message */
 			for (int i = 0; i < MAX_PROCESSES_AMOUNT; i++) {
-				if (!processTable[i].occupied) {
+				if (!processTable[i].occupied || processTable[i].blocked) {
 					continue;
 				}
 				MessageBuffer messageReceived;
 				if (msgrcv(messageQueueId, &messageReceived, sizeof(MessageBuffer) - sizeof(long), processTable[i].pid, IPC_NOWAIT) == -1) {
 					/* No message received - skip remaining code in loop and go to next iteration */
-					if (errno == ENOMSG) {						
+					if (errno == ENOMSG) {
 						continue;
 					}
 					else {
@@ -314,8 +341,13 @@ int main(int argc, char** argv) {
 				/* Terminate */
 				if (messageReceived.value == -1) {
 					printfConsoleAndFile("OSS: worker %d (PID %d) will terminate\n", i, processTable[i].pid);
+					/* Discard messages */
+					MessageBuffer temp;
+					while (msgrcv(messageQueueId, &temp, sizeof(MessageBuffer) - sizeof(long), processTable[i].pid, IPC_NOWAIT) != -1) {
+					}
 					freeProcess(resources, i);
 					removePidFromProcessTable(processTable[i].pid);
+					instancesRunning--;
 				}
 				/* Request */
 				else if (messageReceived.value < RESOURCE_TYPES_AMOUNT) {
@@ -326,8 +358,6 @@ int main(int argc, char** argv) {
 						MessageBuffer messageToSend;
 						messageToSend.messageType = processPidToMessage;
 						messageToSend.value = 1;
-
-						printfConsoleAndFile("OSS: Sending message to worker %d (PID: %ld) at time %d:%d\n", i, processPidToMessage, sharedClock[0], sharedClock[1]);
 						if (msgsnd(messageQueueId, &messageToSend, sizeof(MessageBuffer) - sizeof(long), 0) == -1) {
 							perror("OSS: Fatal error, msgsnd to child failed, terminating...\n");
 							printf("errno: %d\n", errno);
@@ -340,6 +370,7 @@ int main(int argc, char** argv) {
 					/* Unable to request resource */
 					else {
 						printfConsoleAndFile("OSS: worker %d (PID %d) requested resource %d but not available, blocking...\n", i, processTable[i].pid, messageReceived.value);
+						resources[messageReceived.value].requested[i]++;
 						processTable[i].blocked = true;
 					}
 				}
@@ -350,8 +381,8 @@ int main(int argc, char** argv) {
 					freeFromProcess(resources[resourceId],i);
 				}
 			}
-			/* Add 1 ms */
-			addToClock(sharedClock[0], sharedClock[1], 0, ONE_BILLION / 1000);
+			/* Add 10 ms */
+			addToClock(sharedClock[0], sharedClock[1], 0, ONE_BILLION / 100);
 		}
 	}
 

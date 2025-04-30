@@ -44,12 +44,22 @@ int makeDecision(int resourceAllocatedAmount) {
 	if (random == 0) {
 		return 2;
 	}
-	/* Free a resource, only if able, but forced to free if it is maxed out */
-	if ((random <= 40 && resourceAllocatedAmount > 0) || resourceAllocatedAmount >= RESOURCE_INSTANCES_AMOUNT) {
+	/* Free a resource if it is maxed out */
+	if (resourceAllocatedAmount >= 3) {
 		return 1;
 	}
+	/* Free a resource randomly, if able */
+	if (random <= 40 && resourceAllocatedAmount > 0) {
+		return 1;
+	}
+	printf("WORKER: Requesting resource with %d already allocated\n", resourceAllocatedAmount);
 	/* Request a resource */
-	return 0;
+	if (resourceAllocatedAmount < 3) {
+		return 0;
+	}
+	
+	/* Not intended to reach here. this is a failsafe and won't do anything */
+	return -1;
 }
 
 /* Prepared printf statement that displays clock & process details */
@@ -73,7 +83,7 @@ int main(int argc, char** argv) {
 	}
 
 	/* Set up resources */
-	int allocatedResources[RESOURCE_TYPES_AMOUNT];
+	int* allocatedResources = new int[RESOURCE_TYPES_AMOUNT];
 	for (int i = 0; i < RESOURCE_TYPES_AMOUNT; i++) {
 		allocatedResources[i] = 0;
 	}
@@ -108,6 +118,8 @@ int main(int argc, char** argv) {
 	int nextDecisionSeconds = 0;
 	int nextDecisionNano = nextDecisionIntervalNano;
 	bool willTerminate = false;
+	bool blocked = false;
+	int requestedResource = -1;
 
 	/* Adds simulated clock's time to the passed in duration to get the time to make a decision */
 	addToClock(nextDecisionSeconds, nextDecisionNano, sharedClock[0], sharedClock[1]);
@@ -115,19 +127,38 @@ int main(int argc, char** argv) {
 	printf("WORKER: Just starting...\n");
 
 	while (!willTerminate) {
+		if (blocked) {
+			MessageBuffer messageReceived;
+			if (msgrcv(messageQueueId, &messageReceived, sizeof(MessageBuffer) - sizeof(long), getpid(), IPC_NOWAIT) == -1) {
+				if (errno == ENOMSG) {
+					continue;
+				}
+				perror("OSS: Fatal error, msgsnd to parent failed, terminating...\n");
+				exit(1);
+			}
+			allocatedResources[requestedResource]++;
+			blocked = false;
+			continue;
+		}
 		int decisionCode = -1;
 		bool canRequestResource;
 		int resourceIndex;
 		if (hasTimePassed(sharedClock[0], sharedClock[1], nextDecisionSeconds, nextDecisionNano)) {
 			resourceIndex = rand() % 5;
 			decisionCode = makeDecision(allocatedResources[resourceIndex]);
+			nextDecisionSeconds = sharedClock[0];
+			nextDecisionNano = sharedClock[1];
 			addToClock(nextDecisionSeconds, nextDecisionNano, 0, nextDecisionIntervalNano);
-			printf("WORKER: Making decision %d\n", decisionCode);
+		}
+		else {
+			continue;
 		}
 
 		MessageBuffer messageToSend;
 		messageToSend.messageType = getpid();
 		/* Request a resource*/
+		printf("R0: %d R1: %d R2: %d R3: %d R4: %d\n", allocatedResources[0], allocatedResources[1], allocatedResources[2], allocatedResources[3], allocatedResources[4]);
+
 		if (decisionCode == 0) {
 			/* Send message back to parent to request resource */
 			messageToSend.value = resourceIndex;
@@ -136,12 +167,19 @@ int main(int argc, char** argv) {
 				exit(1);
 			}
 
+			blocked = true;
+			requestedResource = resourceIndex;
+			allocatedResources[resourceIndex]++;
+
 			/* Wait to receive a message from oss that the resource was granted */
 			MessageBuffer messageReceived;
-			if (msgrcv(messageQueueId, &messageToSend, sizeof(MessageBuffer) - sizeof(long), getpid(), 0) == -1) {
+			if (msgrcv(messageQueueId, &messageReceived, sizeof(MessageBuffer) - sizeof(long), getpid(), 0) == -1) {
 				perror("OSS: Fatal error, msgsnd to parent failed, terminating...\n");
 				exit(1);
 			}
+			blocked = false;
+			requestedResource = -1;
+
 		}
 		/* Free a resource*/
 		if (decisionCode == 1) {
@@ -151,6 +189,7 @@ int main(int argc, char** argv) {
 				perror("OSS: Fatal error, msgsnd to parent failed, terminating...\n");
 				exit(1);
 			}
+			allocatedResources[resourceIndex]--;
 		}
 		/* Termination */
 		if (decisionCode == 2) {
@@ -163,8 +202,7 @@ int main(int argc, char** argv) {
 			}
 		}
 	}
-
-	printf("WORKER: Time limit reached, terminating...\n");
+	delete[] allocatedResources;
 
 	shmdt(sharedClock);
 

@@ -15,8 +15,8 @@ struct Descriptor {
 };
 
 std::array<Descriptor, RESOURCE_TYPES_AMOUNT> createResources();
-bool allocateToProcess(Descriptor resource, int processId);
-bool freeFromProcess(Descriptor resource, int processId);
+bool allocateToProcess(Descriptor& resource, int processId);
+bool freeFromProcess(Descriptor& resource, int processId);
 void freeProcess(Descriptor* resources, int processId);
 
 #endif

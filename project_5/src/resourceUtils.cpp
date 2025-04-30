@@ -17,18 +17,17 @@ array<Descriptor, RESOURCE_TYPES_AMOUNT> createResources() {
 }
 
 /* Allocates a resource to a particular process, if able. Returns whether successful */
-bool allocateToProcess(Descriptor resource, int processId) {
+bool allocateToProcess(Descriptor& resource, int processId) {
     if (processId < 0 || processId >= MAX_PROCESSES_AMOUNT) return false;
-    if (resource.availableInstances < 1) return false;
+    if (resource.availableInstances < 1 || resource.allocated[processId] >= RESOURCE_INSTANCES_AMOUNT) return false;
 
     resource.allocated[processId]++;
     resource.availableInstances--;
-    resource.requested[processId]--;
     return true;
 }
 
 /* Frees one particular resource from a particular process, if able. Returns whether successful */
-bool freeFromProcess(Descriptor resource, int processId) {
+bool freeFromProcess(Descriptor& resource, int processId) {
     if (processId < 0 || processId >= MAX_PROCESSES_AMOUNT) return false;
     if (resource.allocated[processId] < 1) return false;
 
@@ -36,12 +35,14 @@ bool freeFromProcess(Descriptor resource, int processId) {
     resource.availableInstances++;
     return true;
 }
+
  /* Removes everything associated with a process. Used for when the process is terminated */
 void freeProcess(Descriptor* resources, int processId) {
     if (processId < 0 || processId >= MAX_PROCESSES_AMOUNT) return;
-    for (int i; i < RESOURCE_TYPES_AMOUNT; i++) {
+    for (int i = 0; i < RESOURCE_TYPES_AMOUNT; i++) {
         int resourcesFreed = resources[i].allocated[processId];
         resources[i].availableInstances += resourcesFreed;
+        resources[i].allocated[processId] = 0;
         resources[i].requested[processId] = 0;
     }
 }
