@@ -30,6 +30,7 @@ struct PCB processTable[PROCESS_TABLE_MAX_SIZE];
 struct MessageBuffer {
 	long messageType;
 	int value;
+	int id;
 };
 int sharedMemoryId;
 int* sharedClock;
@@ -240,6 +241,8 @@ int main(int argc, char** argv) {
 
 	int instancesRunning = 0;
 	int totalInstancesToLaunch = processesAmount;
+
+	int messageId = 0;
 	while (totalInstancesToLaunch > 0 || instancesRunning > 0) {
 		pid_t childPid = -1;
 		bool shouldAddToProcessTable = false;
@@ -332,12 +335,15 @@ int main(int argc, char** argv) {
 					}
 					else {
 						perror("OSS: Fatal error, msgrcv from child failed, terminating...\n");
-						cleanUpSharedMemory();
-						closeLogFileIfOpen();
-						msgctl(messageQueueId, IPC_RMID, NULL);
+						handleFailsafeSignal(1);
 						exit(1);
 					}
 				}
+				if (messageReceived.id != messageId) {
+					printfConsoleAndFile("!!! OSS: Received message id %d but expected %d\n", messageReceived.id, messageId);
+				}
+				messageId++;
+
 				/* Terminate */
 				if (messageReceived.value == -1) {
 					printfConsoleAndFile("OSS: worker %d (PID %d) will terminate\n", i, processTable[i].pid);
@@ -348,6 +354,7 @@ int main(int argc, char** argv) {
 					freeProcess(resources, i);
 					removePidFromProcessTable(processTable[i].pid);
 					instancesRunning--;
+					messageId = 0;
 				}
 				/* Request */
 				else if (messageReceived.value < RESOURCE_TYPES_AMOUNT) {
@@ -361,9 +368,7 @@ int main(int argc, char** argv) {
 						if (msgsnd(messageQueueId, &messageToSend, sizeof(MessageBuffer) - sizeof(long), 0) == -1) {
 							perror("OSS: Fatal error, msgsnd to child failed, terminating...\n");
 							printf("errno: %d\n", errno);
-							cleanUpSharedMemory();
-							closeLogFileIfOpen();
-							msgctl(messageQueueId, IPC_RMID, NULL);
+							handleFailsafeSignal(1);
 							exit(1);
 						}
 					}
@@ -372,6 +377,8 @@ int main(int argc, char** argv) {
 						printfConsoleAndFile("OSS: worker %d (PID %d) requested resource %d but not available, blocking...\n", i, processTable[i].pid, messageReceived.value);
 						resources[messageReceived.value].requested[i]++;
 						processTable[i].blocked = true;
+						handleFailsafeSignal(1);
+						exit(1);
 					}
 				}
 				/* Free - freeing should always be successful when received by oss */

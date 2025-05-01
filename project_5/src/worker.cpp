@@ -17,6 +17,7 @@ using namespace std;
 struct MessageBuffer {
 	long messageType;
 	int value;
+	int id;
 };
 
 /* Function to verify whether the argument is not null, numeric, and at least 1 */
@@ -120,6 +121,7 @@ int main(int argc, char** argv) {
 	bool willTerminate = false;
 	bool blocked = false;
 	int requestedResource = -1;
+	int messageId = 0;
 
 	/* Adds simulated clock's time to the passed in duration to get the time to make a decision */
 	addToClock(nextDecisionSeconds, nextDecisionNano, sharedClock[0], sharedClock[1]);
@@ -128,8 +130,8 @@ int main(int argc, char** argv) {
 
 	while (!willTerminate) {
 		if (blocked) {
-			MessageBuffer messageReceived;
-			if (msgrcv(messageQueueId, &messageReceived, sizeof(MessageBuffer) - sizeof(long), getpid(), IPC_NOWAIT) == -1) {
+			MessageBuffer blockedMessageReceived;
+			if (msgrcv(messageQueueId, &blockedMessageReceived, sizeof(MessageBuffer) - sizeof(long), getpid(), IPC_NOWAIT) == -1) {
 				if (errno == ENOMSG) {
 					continue;
 				}
@@ -156,6 +158,8 @@ int main(int argc, char** argv) {
 
 		MessageBuffer messageToSend;
 		messageToSend.messageType = getpid();
+		messageToSend.id = messageId;
+		messageId++;
 		/* Request a resource*/
 		printf("R0: %d R1: %d R2: %d R3: %d R4: %d\n", allocatedResources[0], allocatedResources[1], allocatedResources[2], allocatedResources[3], allocatedResources[4]);
 
@@ -176,6 +180,9 @@ int main(int argc, char** argv) {
 			if (msgrcv(messageQueueId, &messageReceived, sizeof(MessageBuffer) - sizeof(long), getpid(), 0) == -1) {
 				perror("OSS: Fatal error, msgsnd to parent failed, terminating...\n");
 				exit(1);
+			}
+			if (!blocked) {
+				perror("WORKER: Should not be here...\n");
 			}
 			blocked = false;
 			requestedResource = -1;
