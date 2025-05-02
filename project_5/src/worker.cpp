@@ -45,7 +45,7 @@ int makeDecision(int resourceAllocatedAmount) {
 		return 2;
 	}
 	/* Free a resource if it is maxed out */
-	if (resourceAllocatedAmount >= 3) {
+	if (resourceAllocatedAmount >= RESOURCE_INSTANCES_AMOUNT) {
 		return 1;
 	}
 	/* Free a resource randomly, if able */
@@ -53,7 +53,7 @@ int makeDecision(int resourceAllocatedAmount) {
 		return 1;
 	}
 	/* Request a resource */
-	if (resourceAllocatedAmount < 3) {
+	if (resourceAllocatedAmount < RESOURCE_INSTANCES_AMOUNT) {
 		return 0;
 	}
 	
@@ -161,7 +161,6 @@ int main(int argc, char** argv) {
 		if (decisionCode == 0) {
 			/* Send message back to parent to request resource */
 			messageToSend.value = resourceIndex;
-			printf("WORKER: Sending message with value %d\n", messageToSend.value);
 			if (msgsnd(messageQueueId, &messageToSend, sizeof(MessageBuffer) - sizeof(long), 0) == -1) {
 				perror("OSS: Fatal error, msgsnd to parent failed, terminating...\n");
 				exit(1);
@@ -184,8 +183,6 @@ int main(int argc, char** argv) {
 		if (decisionCode == 1) {
 			/* Send message back to parent to free resource */
 			messageToSend.value = resourceIndex + RESOURCE_TYPES_AMOUNT;
-			printf("WORKER: Sending message with value %d\n", messageToSend.value);
-
 			if (msgsnd(messageQueueId, &messageToSend, sizeof(MessageBuffer) - sizeof(long), 0) == -1) {
 				perror("OSS: Fatal error, msgsnd to parent failed, terminating...\n");
 				exit(1);
@@ -196,8 +193,6 @@ int main(int argc, char** argv) {
 		if (decisionCode == 2) {
 			/* Send message back to parent to terminate */
 			messageToSend.value = -1;
-			printf("WORKER: Sending message with value %d\n", messageToSend.value);
-
 			willTerminate = true;
 			if (msgsnd(messageQueueId, &messageToSend, sizeof(MessageBuffer) - sizeof(long), 0) == -1) {
 				perror("OSS: Fatal error, msgsnd to parent failed, terminating...\n");

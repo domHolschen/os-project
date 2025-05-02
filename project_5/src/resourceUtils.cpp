@@ -19,7 +19,7 @@ array<Descriptor, RESOURCE_TYPES_AMOUNT> createResources() {
 /* Allocates a resource to a particular process, if able. Returns whether successful */
 bool allocateToProcess(Descriptor& resource, int processId) {
     if (processId < 0 || processId >= MAX_PROCESSES_AMOUNT) return false;
-    if (resource.availableInstances < 1 || resource.allocated[processId] >= RESOURCE_INSTANCES_AMOUNT) return false;
+    if (resource.availableInstances < 0 || resource.allocated[processId] >= RESOURCE_INSTANCES_AMOUNT) return false;
 
     resource.allocated[processId]++;
     resource.availableInstances--;
