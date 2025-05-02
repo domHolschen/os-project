@@ -17,6 +17,7 @@ using namespace std;
 #define SHMKEY 9021011
 #define BUFFER_SIZE sizeof(int) * 2
 const int PROCESS_TABLE_MAX_SIZE = 18;
+const int GRANT_RESOURCE_MESSAGE_VALUE = RESOURCE_TYPES_AMOUNT * 2;
 
 struct PCB {
 	bool occupied; // either true or false
@@ -30,7 +31,6 @@ struct PCB processTable[PROCESS_TABLE_MAX_SIZE];
 struct MessageBuffer {
 	long messageType;
 	int value;
-	int id;
 };
 int sharedMemoryId;
 int* sharedClock;
@@ -242,7 +242,6 @@ int main(int argc, char** argv) {
 	int instancesRunning = 0;
 	int totalInstancesToLaunch = processesAmount;
 
-	int messageId = 0;
 	while (totalInstancesToLaunch > 0 || instancesRunning > 0) {
 		pid_t childPid = -1;
 		bool shouldAddToProcessTable = false;
@@ -306,7 +305,7 @@ int main(int argc, char** argv) {
 						printfConsoleAndFile("OSS: blocked worker %d (PID %d) requested resource %d and is granted\n", i, processTable[i].pid, j);
 						long processPidToMessage = processTable[i].pid;
 						MessageBuffer messageToSend;
-						messageToSend.messageType = processPidToMessage;
+						messageToSend.messageType = processPidToMessage + 1000000;
 						messageToSend.value = 1;
 						if (msgsnd(messageQueueId, &messageToSend, sizeof(MessageBuffer) - sizeof(long), 0) == -1) {
 							perror("OSS: Fatal error, msgsnd to child failed, terminating...\n");
@@ -339,10 +338,6 @@ int main(int argc, char** argv) {
 						exit(1);
 					}
 				}
-				if (messageReceived.id != messageId) {
-					printfConsoleAndFile("!!! OSS: Received message id %d but expected %d\n", messageReceived.id, messageId);
-				}
-				messageId++;
 
 				/* Terminate */
 				if (messageReceived.value == -1) {
@@ -354,7 +349,6 @@ int main(int argc, char** argv) {
 					freeProcess(resources, i);
 					removePidFromProcessTable(processTable[i].pid);
 					instancesRunning--;
-					messageId = 0;
 				}
 				/* Request */
 				else if (messageReceived.value < RESOURCE_TYPES_AMOUNT) {
@@ -363,8 +357,8 @@ int main(int argc, char** argv) {
 						printfConsoleAndFile("OSS: worker %d (PID %d) requested resource %d and is granted\n", i, processTable[i].pid, messageReceived.value);
 						long processPidToMessage = processTable[i].pid;
 						MessageBuffer messageToSend;
-						messageToSend.messageType = processPidToMessage;
-						messageToSend.value = 1;
+						messageToSend.messageType = processPidToMessage + 1000000;
+						messageToSend.value = GRANT_RESOURCE_MESSAGE_VALUE;
 						if (msgsnd(messageQueueId, &messageToSend, sizeof(MessageBuffer) - sizeof(long), 0) == -1) {
 							perror("OSS: Fatal error, msgsnd to child failed, terminating...\n");
 							printf("errno: %d\n", errno);
@@ -382,7 +376,7 @@ int main(int argc, char** argv) {
 					}
 				}
 				/* Free - freeing should always be successful when received by oss */
-				else {
+				else if (messageReceived.value < GRANT_RESOURCE_MESSAGE_VALUE) {
 					int resourceId = messageReceived.value - RESOURCE_TYPES_AMOUNT;
 					printfConsoleAndFile("OSS: worker %d (PID %d) is freeing one of its resources %d\n", i, processTable[i].pid, resourceId);
 					freeFromProcess(resources[resourceId],i);

@@ -17,7 +17,6 @@ using namespace std;
 struct MessageBuffer {
 	long messageType;
 	int value;
-	int id;
 };
 
 /* Function to verify whether the argument is not null, numeric, and at least 1 */
@@ -53,7 +52,6 @@ int makeDecision(int resourceAllocatedAmount) {
 	if (random <= 40 && resourceAllocatedAmount > 0) {
 		return 1;
 	}
-	printf("WORKER: Requesting resource with %d already allocated\n", resourceAllocatedAmount);
 	/* Request a resource */
 	if (resourceAllocatedAmount < 3) {
 		return 0;
@@ -121,7 +119,6 @@ int main(int argc, char** argv) {
 	bool willTerminate = false;
 	bool blocked = false;
 	int requestedResource = -1;
-	int messageId = 0;
 
 	/* Adds simulated clock's time to the passed in duration to get the time to make a decision */
 	addToClock(nextDecisionSeconds, nextDecisionNano, sharedClock[0], sharedClock[1]);
@@ -158,31 +155,26 @@ int main(int argc, char** argv) {
 
 		MessageBuffer messageToSend;
 		messageToSend.messageType = getpid();
-		messageToSend.id = messageId;
-		messageId++;
 		/* Request a resource*/
 		printf("R0: %d R1: %d R2: %d R3: %d R4: %d\n", allocatedResources[0], allocatedResources[1], allocatedResources[2], allocatedResources[3], allocatedResources[4]);
 
 		if (decisionCode == 0) {
 			/* Send message back to parent to request resource */
 			messageToSend.value = resourceIndex;
+			printf("WORKER: Sending message with value %d\n", messageToSend.value);
 			if (msgsnd(messageQueueId, &messageToSend, sizeof(MessageBuffer) - sizeof(long), 0) == -1) {
 				perror("OSS: Fatal error, msgsnd to parent failed, terminating...\n");
 				exit(1);
 			}
 
-			blocked = true;
 			requestedResource = resourceIndex;
 			allocatedResources[resourceIndex]++;
 
 			/* Wait to receive a message from oss that the resource was granted */
 			MessageBuffer messageReceived;
-			if (msgrcv(messageQueueId, &messageReceived, sizeof(MessageBuffer) - sizeof(long), getpid(), 0) == -1) {
+			if (msgrcv(messageQueueId, &messageReceived, sizeof(MessageBuffer) - sizeof(long), getpid() + 1000000, 0) == -1) {
 				perror("OSS: Fatal error, msgsnd to parent failed, terminating...\n");
 				exit(1);
-			}
-			if (!blocked) {
-				perror("WORKER: Should not be here...\n");
 			}
 			blocked = false;
 			requestedResource = -1;
@@ -192,6 +184,8 @@ int main(int argc, char** argv) {
 		if (decisionCode == 1) {
 			/* Send message back to parent to free resource */
 			messageToSend.value = resourceIndex + RESOURCE_TYPES_AMOUNT;
+			printf("WORKER: Sending message with value %d\n", messageToSend.value);
+
 			if (msgsnd(messageQueueId, &messageToSend, sizeof(MessageBuffer) - sizeof(long), 0) == -1) {
 				perror("OSS: Fatal error, msgsnd to parent failed, terminating...\n");
 				exit(1);
@@ -202,6 +196,8 @@ int main(int argc, char** argv) {
 		if (decisionCode == 2) {
 			/* Send message back to parent to terminate */
 			messageToSend.value = -1;
+			printf("WORKER: Sending message with value %d\n", messageToSend.value);
+
 			willTerminate = true;
 			if (msgsnd(messageQueueId, &messageToSend, sizeof(MessageBuffer) - sizeof(long), 0) == -1) {
 				perror("OSS: Fatal error, msgsnd to parent failed, terminating...\n");
