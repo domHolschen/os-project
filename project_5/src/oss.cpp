@@ -135,6 +135,57 @@ void handleFailsafeSignal(int signal) {
 	exit(1);
 }
 
+/* Part of the provided deadlock detection algorithm*/
+bool req_lt_avail(const int* req, const int* avail, const int pnum, const int num_res) {
+	int i(0);
+	for (; i < num_res; i++)
+		if (req[pnum * num_res + i] > avail[i])
+			break;
+	return (i == num_res);
+}
+
+/* Deadlock detection function provided from professor but modified */
+bool deadlock(const int n, Descriptor* resources, bool* finish) {
+	/* Transforms data into a format that works with the provided code */
+	const int m = RESOURCE_TYPES_AMOUNT;
+	int request[n * RESOURCE_TYPES_AMOUNT];
+	int allocated[n * RESOURCE_TYPES_AMOUNT];
+	for (int i = 0; i < n; i++) {
+		for (int j = 0; j < RESOURCE_TYPES_AMOUNT; j++) {
+			request[i * RESOURCE_TYPES_AMOUNT + j] = resources[j].requested[i];
+			allocated[i * RESOURCE_TYPES_AMOUNT + j] = resources[j].allocated[i];
+		}
+	}
+	int available[RESOURCE_TYPES_AMOUNT];
+	for (int i = 0; i < RESOURCE_TYPES_AMOUNT; i++) {
+		available[i] = resources[i].availableInstances;
+	}
+
+	int work[m]; // m resources
+	for (int i = 0; i < m; i++) {
+		work[i] = available[i];
+	}
+	for (int i =  0; i < n; finish[i++] = false);
+
+	int p;
+	for (p = 0; p < n; p++) {
+		if (finish[p]) continue;
+		if (req_lt_avail(request, work, p, m)) {
+			finish[p] = true;
+			for (int i = 0; i < m; i++)
+				work[i] += allocated[p * m + i];
+			p = -1;
+		}
+	}
+
+	for (p = 0; p < n; p++) {
+		if (!finish[p]) {
+			return true;
+		}
+	}
+	return false;
+}
+
 int main(int argc, char** argv) {
 	const char optstr[] = "hn:s:i:f:";
 	char opt;
@@ -296,7 +347,7 @@ int main(int argc, char** argv) {
 			
 			/* First looks at blocked processes */
 			for (int i = 0; i < MAX_PROCESSES_AMOUNT; i++) {
-				if (!processTable[i].occupied || processTable[i].blocked) {
+				if (!processTable[i].occupied || !processTable[i].blocked) {
 					continue;
 				}
 				
@@ -315,6 +366,7 @@ int main(int argc, char** argv) {
 							msgctl(messageQueueId, IPC_RMID, NULL);
 							exit(1);
 						}
+						processTable[i].blocked = false;
 						resources[j].requested[i]--;
 						allocateToProcess(resources[j], i);
 					}
@@ -365,14 +417,13 @@ int main(int argc, char** argv) {
 							handleFailsafeSignal(1);
 							exit(1);
 						}
+						printfConsoleAndFile("OSS: R%d available resources: %d\n", messageReceived.value, resources[messageReceived.value].availableInstances);
 					}
 					/* Unable to request resource */
 					else {
 						printfConsoleAndFile("OSS: worker %d (PID %d) requested resource %d but not available, blocking...\n", i, processTable[i].pid, messageReceived.value);
 						resources[messageReceived.value].requested[i]++;
 						processTable[i].blocked = true;
-						handleFailsafeSignal(1);
-						exit(1);
 					}
 				}
 				/* Free - freeing should always be successful when received by oss */
@@ -381,6 +432,29 @@ int main(int argc, char** argv) {
 					printfConsoleAndFile("OSS: worker %d (PID %d) is freeing one of its resources %d\n", i, processTable[i].pid, resourceId);
 					freeFromProcess(resources[resourceId],i);
 				}
+			}
+
+			bool finish[maxSimultaneousProcesses];
+			if (deadlock(maxSimultaneousProcesses, resources, finish)) {
+				int processIndexToKill = -1;
+				printfConsoleAndFile("OSS: Deadlock detected! The following processes are in deadlock:\n");
+				for (int i = 0; i < maxSimultaneousProcesses; i++) {
+					if (!finish[i]) {
+						printfConsoleAndFile("P%d ", i);
+						if (processIndexToKill == -1) {
+							processIndexToKill = i;
+						}
+					}
+				}
+				printfConsoleAndFile("\nTerminating worker %d\n", processIndexToKill);
+				kill(processTable[processIndexToKill].pid, SIGKILL);
+				/* Discard messages */
+				MessageBuffer temp;
+				while (msgrcv(messageQueueId, &temp, sizeof(MessageBuffer) - sizeof(long), processTable[processIndexToKill].pid, IPC_NOWAIT) != -1) {
+				}
+				freeProcess(resources, processIndexToKill);
+				removePidFromProcessTable(processTable[processIndexToKill].pid);
+				instancesRunning--;
 			}
 			/* Add 10 ms */
 			addToClock(sharedClock[0], sharedClock[1], 0, ONE_BILLION / 100);

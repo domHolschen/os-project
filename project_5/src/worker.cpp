@@ -82,10 +82,7 @@ int main(int argc, char** argv) {
 	}
 
 	/* Set up resources */
-	int* allocatedResources = new int[RESOURCE_TYPES_AMOUNT];
-	for (int i = 0; i < RESOURCE_TYPES_AMOUNT; i++) {
-		allocatedResources[i] = 0;
-	}
+	int allocatedResources[RESOURCE_TYPES_AMOUNT] = { 0 };
 
 	/* Set up message queue */
 	int messageQueueId;
@@ -168,6 +165,7 @@ int main(int argc, char** argv) {
 
 			requestedResource = resourceIndex;
 			allocatedResources[resourceIndex]++;
+			blocked = true;
 
 			/* Wait to receive a message from oss that the resource was granted */
 			MessageBuffer messageReceived;
@@ -200,8 +198,6 @@ int main(int argc, char** argv) {
 			}
 		}
 	}
-	delete[] allocatedResources;
-
 	shmdt(sharedClock);
 
 	return EXIT_SUCCESS;

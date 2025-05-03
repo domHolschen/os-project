@@ -6,8 +6,8 @@ using namespace std;
 array<Descriptor, RESOURCE_TYPES_AMOUNT> createResources() {
     array<Descriptor, RESOURCE_TYPES_AMOUNT> resources;
     for (int i = 0; i < RESOURCE_TYPES_AMOUNT; i++) {
-        resources[i].totalInstances = MAX_PROCESSES_AMOUNT;
-        resources[i].availableInstances = MAX_PROCESSES_AMOUNT;
+        resources[i].totalInstances = RESOURCE_INSTANCES_AMOUNT;
+        resources[i].availableInstances = RESOURCE_INSTANCES_AMOUNT;
         for (int j = 0; j < MAX_PROCESSES_AMOUNT; j++) {
             resources[i].allocated[j] = 0;
             resources[i].requested[j] = 0;
@@ -19,7 +19,7 @@ array<Descriptor, RESOURCE_TYPES_AMOUNT> createResources() {
 /* Allocates a resource to a particular process, if able. Returns whether successful */
 bool allocateToProcess(Descriptor& resource, int processId) {
     if (processId < 0 || processId >= MAX_PROCESSES_AMOUNT) return false;
-    if (resource.availableInstances < 0 || resource.allocated[processId] >= RESOURCE_INSTANCES_AMOUNT) return false;
+    if (resource.availableInstances < 1 || resource.allocated[processId] >= RESOURCE_INSTANCES_AMOUNT) return false;
 
     resource.allocated[processId]++;
     resource.availableInstances--;
