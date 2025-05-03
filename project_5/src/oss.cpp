@@ -102,30 +102,33 @@ int findNextProcessInTable(int currentIndex) {
 }
 
 /* Acts as a printf statement that writes to both the console and a file if defined */
-void printfConsoleAndFile(const char* baseString, ...) {
+void vprintfConsoleAndFile(const char* baseString, va_list args) {
 	const int MAX_LOGS_AMOUNT = 100000;
 	if (timesWrittenToLogs >= MAX_LOGS_AMOUNT) {
 		return;
 	}
 	timesWrittenToLogs++;
 
-	va_list args;
-
-	va_start(args, baseString);
 	vprintf(baseString, args);
-	va_end(args);
 
-	if (logFile == NULL) {
-		return;
+	if (logFile != NULL) {
+		va_list argsCopy;
+		va_copy(argsCopy, args);
+		vfprintf(logFile, baseString, argsCopy);
+		va_end(argsCopy);
+		fflush(logFile);
 	}
-
-	va_start(args, baseString);
-	vfprintf(logFile, baseString, args);
-	va_end(args);
-	fflush(logFile);
 }
 
-/* Wrapper for printfConsoleAndFile() that returns early if verbose is not enabled */
+/* Wrapper for vprintfConsoleAndFile() that prints regardless of verbose flag */
+void printfConsoleAndFile(const char* baseString, ...) {
+	va_list args;
+	va_start(args, baseString);
+	vprintfConsoleAndFile(baseString, args);
+	va_end(args);
+}
+
+/* Wrapper for vprintfConsoleAndFile() that returns early if verbose is not enabled */
 void printfConsoleAndFileVerbose(const char* baseString, ...) {
 	if (!VERBOSE_LOGS_ENABLED) {
 		return;
@@ -133,7 +136,7 @@ void printfConsoleAndFileVerbose(const char* baseString, ...) {
 
 	va_list args;
 	va_start(args, baseString);
-	printfConsoleAndFile(baseString, args);
+	vprintfConsoleAndFile(baseString, args);
 	va_end(args);
 }
 
@@ -379,8 +382,6 @@ int main(int argc, char** argv) {
 				addToClock(pcbTimerSeconds, pcbTimerNano, 0, ONE_BILLION / 2);
 				printfConsoleAndFile("Process table:\n\tR0\tR1\tR2\tR3\tR4\n");
 				for (int i = 0; i < maxSimultaneousProcesses; i++) {
-					const char* isOccupied = processTable[i].occupied ? "true" : "false";
-					const char* tabIfNanosecondsIsZero = processTable[i].startNano == 0 ? "\t" : "";
 					printfConsoleAndFile("P%d\t%d\t%d\t%d\t%d\t%d\n", i, resources[0].allocated[i], resources[1].allocated[i], resources[2].allocated[i], resources[3].allocated[i], resources[4].allocated[i]);
 				}
 			}
@@ -434,17 +435,17 @@ int main(int argc, char** argv) {
 
 				/* Terminate */
 				if (messageReceived.value == -1) {
-					printfConsoleAndFile("OSS: worker %d (PID %d) will terminate - Resources released: ", i, processTable[i].pid);
+					printfConsoleAndFileVerbose("OSS: worker %d (PID %d) will terminate - Resources released: ", i, processTable[i].pid);
 					/* Discard messages */
 					MessageBuffer temp;
 					while (msgrcv(messageQueueId, &temp, sizeof(MessageBuffer) - sizeof(long), processTable[i].pid, IPC_NOWAIT) != -1) {
 					}
 					for (int j = 0; j < RESOURCE_TYPES_AMOUNT; j++) {
 						if (resources[j].allocated[i] > 0) {
-							printfConsoleAndFile("R%d:%d  ", j, resources[j].allocated[i]);
+							printfConsoleAndFileVerbose("R%d:%d  ", j, resources[j].allocated[i]);
 						}
 					}
-					printfConsoleAndFile("\n");
+					printfConsoleAndFileVerbose("\n");
 					freeProcess(resources, i);
 					if (processTable[i].wasProcessEverDeadlocked) {
 						stats.totalProcessesDeadlocked++;
@@ -473,6 +474,7 @@ int main(int argc, char** argv) {
 					/* Unable to request resource */
 					else {
 						printfConsoleAndFile("OSS: worker %d (PID %d) requested resource %d but not available, blocking...\n", i, processTable[i].pid, messageReceived.value);
+						printfConsoleAndFileVerbose("OSS: Child blocked at time %d:%d\n", sharedClock[0], sharedClock[1]);
 						resources[messageReceived.value].requested[i]++;
 						processTable[i].blocked = true;
 					}
@@ -480,7 +482,7 @@ int main(int argc, char** argv) {
 				/* Free - freeing should always be successful when received by oss */
 				else if (messageReceived.value < GRANT_RESOURCE_MESSAGE_VALUE) {
 					int resourceId = messageReceived.value - RESOURCE_TYPES_AMOUNT;
-					printfConsoleAndFile("OSS: worker %d (PID %d) is freeing an instance of its resource %d\n", i, processTable[i].pid, resourceId);
+					printfConsoleAndFileVerbose("OSS: worker %d (PID %d) is freeing an instance of its resource %d\n", i, processTable[i].pid, resourceId);
 					freeFromProcess(resources[resourceId],i);
 				}
 			}

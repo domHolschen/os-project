@@ -1,27 +1,38 @@
 os-project by Dominic Holschen
-Project 3
-See the repo on github: https://github.com/domHolschen/os-project, folder project_3
+Project 5
+See the repo on github: https://github.com/domHolschen/os-project, folder project_5
+
+This simulates an operating system process that creates children and request resources.
+It detects if there is a deadlock and attempts to resolve it by terminating processes involved in the deadlock.
 
 To Compile:
 Use the `make` command to invoke the Makefile and create the executables `worker` and `oss`.
-The `clockUtils` files are library code created for the executables that get compiled into them when `make` is executed.
+The `clockUtils` and `resourceUtils` files are library code created for the executables that get compiled into them when `make` is executed.
 When oss is executed, it creates a file called `keyfile.txt`. That is necessary for the program to run but it is recreated at runtime if it does not exist.
 
 These tools use a simulated clock so times displayed may not be accurate to realtime. On most modern machines it will run much faster than realtime.
+They use a message queue to communicate requests or if they are terminating.
 
 worker:
-Tool that intakes 2 arguments. That argument is the amount of time the worker will run for.
-The first argument being the amount of seconds and the second being the amount of nanoseconds.
+Tool that intakes an argument (interval in ms that it decides what it will do).
 The arguments are integers and have a minumum value of 1. Invalid inputs will be defaulted to 1.
+Whenever the interval elapses, it makes a decision randomly:
+Requests a resource: 80%
+Frees a random resource: 19.5%
+Terminates itself: 0.5%
+It will NOT free a resource if it doesn't have any of it already (it instead requests it).
+It will also NOT request a resource if it currently has the same amount that is in the system (set to 10 instances), in which case it frees one of that resource type.
+When terminating, it frees all of its resources back in the system.
 
 oss:
-Tool with 6 different options. It invokes `worker` processes and continues until all instances are created and finished.
+Tool with 5 different options. It invokes `worker` processes and continues until all instances are created and finished.
 Usage: oss [-h] [-n proc] [-s simul] [-t time] [-i interv] [-f logfile]
 -h : Print options for the oss tool and exits
 -n : Total number of processes to run (default: 1)
--s : Maximum number of simultaneously running processes. Maximum of 20 (defaults to max value)
--t : Workers are executed with a random amount of time, this defines the maximum number of seconds that workers will run (default: 1)
+-s : Maximum number of simultaneously running processes. Maximum of 18 (defaults to max value)
 -i : Interval (in ms) to launch child processes (default: 0)
--f : Specify a filename to save a copy of oss's logs to (disabled by default)
-Every half second it prints the process table of its children.
-After 60 real-life seconds (not using the simulated clock) it will shut down as a failsafe.
+-f : Specify a filename to save a copy of oss's logs to (disabled by default). If the file does not exist, it is created. Note that it overwrites the data each time it is ran
+Every half second it prints how the resources are allocated to the children.
+After 5 real-life seconds (not using the simulated clock) it will shut down as a failsafe.
+There is a flag in the code, VERBOSE_LOGS_ENABLED, that can be set (defaulted to true) before compiling if you would like to adjust what is being logged.
+When disabled, it only displays the process table, when resources are requested, along with the statistics at the end.
