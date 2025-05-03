@@ -21,6 +21,7 @@ using namespace std;
 	Verbose parameter. Set to true for more detailed logs.
 */
 const bool VERBOSE_LOGS_ENABLED = true;
+int timesWrittenToLogs = 0;
 
 const int PROCESS_TABLE_MAX_SIZE = 18;
 const int GRANT_RESOURCE_MESSAGE_VALUE = RESOURCE_TYPES_AMOUNT * 2;
@@ -30,8 +31,8 @@ struct PCB {
 	pid_t pid; // process id of this child
 	int startSeconds; // time when it was forked
 	int startNano; // time when it was forked
-	int messagesSent; // number of messages sent to the process
 	bool blocked; // if the process is blocked by an unfulfilled request
+	bool wasProcessEverDeadlocked; // used for gathering stats
 };
 struct PCB processTable[PROCESS_TABLE_MAX_SIZE];
 struct MessageBuffer {
@@ -42,6 +43,16 @@ int sharedMemoryId;
 int* sharedClock;
 int messageQueueId;
 FILE* logFile = NULL;
+
+/* Stores stats on OSS run */
+struct Statistics {
+	int requestsGrantedImmediately = 0;
+	int requestsGrantedAfterWait = 0;
+	int processesTerminatedByDeadlock = 0;
+	int processesTerminatedBySelf = 0;
+	int deadlockDetectionRuns = 0;
+	int totalProcessesDeadlocked = 0;
+};
 
 void printHelp() {
 	printf("Usage: oss [-h] [-n proc] [-s simul] [-i interval] [-f logfile]\n");
@@ -73,7 +84,7 @@ void removePidFromProcessTable(pid_t pid) {
 	for (int i = 0; i < PROCESS_TABLE_MAX_SIZE; i++) {
 		if (processTable[i].pid == pid && processTable[i].occupied) {
 			kill(processTable[i].pid, SIGTERM);
-			processTable[i] = { false, 0, 0, 0 };
+			processTable[i] = { false, 0, 0, 0, false, false };
 			return;
 		}
 	}
@@ -92,6 +103,12 @@ int findNextProcessInTable(int currentIndex) {
 
 /* Acts as a printf statement that writes to both the console and a file if defined */
 void printfConsoleAndFile(const char* baseString, ...) {
+	const int MAX_LOGS_AMOUNT = 100000;
+	if (timesWrittenToLogs >= MAX_LOGS_AMOUNT) {
+		return;
+	}
+	timesWrittenToLogs++;
+
 	va_list args;
 
 	va_start(args, baseString);
@@ -270,7 +287,6 @@ int main(int argc, char** argv) {
 		processTable[i] = emptyPcb;
 	}
 	int processIndexToMessage = 0;
-	int totalMessagesSent = 0;
 
 	/* Set up shared memory & attach */
 	sharedMemoryId = shmget(SHMKEY, BUFFER_SIZE, 0777 | IPC_CREAT);
@@ -299,9 +315,15 @@ int main(int argc, char** argv) {
 	int intervalSeconds = forkIntervalMs / 1000;
 	int intervalNano = (forkIntervalMs % 1000) * 1000000;
 
+	/* Used for deadlock detection interval */
+	int nextDeadlockDetectionSecond = 1;
+
 	/* Create resources structure */
 	array<Descriptor, RESOURCE_TYPES_AMOUNT> resourcesArray = createResources();
 	Descriptor* resources = resourcesArray.data();
+
+	/* Set up statistics */
+	Statistics stats = {};
 
 	/* Set up failsafe that kills the program and its children after 60 seconds */
 	signal(SIGALRM, handleFailsafeSignal);
@@ -387,6 +409,7 @@ int main(int argc, char** argv) {
 						processTable[i].blocked = false;
 						resources[j].requested[i]--;
 						allocateToProcess(resources[j], i);
+						stats.requestsGrantedAfterWait++;
 					}
 				}
 			}
@@ -423,8 +446,12 @@ int main(int argc, char** argv) {
 					}
 					printfConsoleAndFile("\n");
 					freeProcess(resources, i);
+					if (processTable[i].wasProcessEverDeadlocked) {
+						stats.totalProcessesDeadlocked++;
+					}
 					removePidFromProcessTable(processTable[i].pid);
 					instancesRunning--;
+					stats.processesTerminatedBySelf++;
 				}
 				/* Request */
 				else if (messageReceived.value < RESOURCE_TYPES_AMOUNT) {
@@ -441,6 +468,7 @@ int main(int argc, char** argv) {
 							handleFailsafeSignal(1);
 							exit(1);
 						}
+						stats.requestsGrantedImmediately++;
 					}
 					/* Unable to request resource */
 					else {
@@ -452,45 +480,64 @@ int main(int argc, char** argv) {
 				/* Free - freeing should always be successful when received by oss */
 				else if (messageReceived.value < GRANT_RESOURCE_MESSAGE_VALUE) {
 					int resourceId = messageReceived.value - RESOURCE_TYPES_AMOUNT;
-					printfConsoleAndFile("OSS: worker %d (PID %d) is freeing one of its resources %d\n", i, processTable[i].pid, resourceId);
+					printfConsoleAndFile("OSS: worker %d (PID %d) is freeing an instance of its resource %d\n", i, processTable[i].pid, resourceId);
 					freeFromProcess(resources[resourceId],i);
 				}
 			}
 
-			bool finish[maxSimultaneousProcesses];
-			if (deadlock(maxSimultaneousProcesses, resources, finish)) {
-				int processIndexToKill = -1;
-				printfConsoleAndFile("OSS: Deadlock detected! The following processes are in deadlock:\n");
-				for (int i = 0; i < maxSimultaneousProcesses; i++) {
-					if (!finish[i]) {
-						printfConsoleAndFile("P%d ", i);
-						if (processIndexToKill == -1) {
-							processIndexToKill = i;
+			/* Deadlock detection */
+			if (sharedClock[0] > nextDeadlockDetectionSecond) {
+				nextDeadlockDetectionSecond = sharedClock[0];
+				stats.deadlockDetectionRuns++;
+				printfConsoleAndFile("OSS: Running deadlock detection...\n");
+				bool finish[maxSimultaneousProcesses];
+				if (deadlock(maxSimultaneousProcesses, resources, finish)) {
+					/* Determine which process to kill */
+					int processIndexToKill = -1;
+					printfConsoleAndFile("OSS: Deadlock detected! The following processes are in deadlock:\n");
+					for (int i = 0; i < maxSimultaneousProcesses; i++) {
+						if (!finish[i]) {
+							printfConsoleAndFile("P%d ", i);
+							if (processIndexToKill == -1) {
+								processIndexToKill = i;
+							}
+							processTable[i].wasProcessEverDeadlocked = true;
 						}
 					}
-				}
-				printfConsoleAndFile("\nOSS: Terminating worker %d - Resources released: ", processIndexToKill);
-				for (int i = 0; i < RESOURCE_TYPES_AMOUNT; i++) {
-					if (resources[i].allocated[processIndexToKill] > 0) {
-						printfConsoleAndFile("R%d:%d  ", i, resources[i].allocated[processIndexToKill]);
+					/* Kill process and free its resources */
+					printfConsoleAndFile("\nOSS: Terminating worker %d - Resources released: ", processIndexToKill);
+					for (int i = 0; i < RESOURCE_TYPES_AMOUNT; i++) {
+						if (resources[i].allocated[processIndexToKill] > 0) {
+							printfConsoleAndFile("R%d:%d  ", i, resources[i].allocated[processIndexToKill]);
+						}
 					}
+					printfConsoleAndFile("\n");
+					kill(processTable[processIndexToKill].pid, SIGKILL);
+					/* Discard messages */
+					MessageBuffer temp;
+					while (msgrcv(messageQueueId, &temp, sizeof(MessageBuffer) - sizeof(long), processTable[processIndexToKill].pid, IPC_NOWAIT) != -1) {
+					}
+					freeProcess(resources, processIndexToKill);
+					removePidFromProcessTable(processTable[processIndexToKill].pid);
+					instancesRunning--;
+					stats.processesTerminatedByDeadlock++;
+					stats.totalProcessesDeadlocked++;
 				}
-				printfConsoleAndFile("\n");
-				kill(processTable[processIndexToKill].pid, SIGKILL);
-				/* Discard messages */
-				MessageBuffer temp;
-				while (msgrcv(messageQueueId, &temp, sizeof(MessageBuffer) - sizeof(long), processTable[processIndexToKill].pid, IPC_NOWAIT) != -1) {
-				}
-				freeProcess(resources, processIndexToKill);
-				removePidFromProcessTable(processTable[processIndexToKill].pid);
-				instancesRunning--;
 			}
+			
 			/* Add 10 ms */
 			addToClock(sharedClock[0], sharedClock[1], 0, ONE_BILLION / 100);
 		}
 	}
 
-	printfConsoleAndFile("OSS: All child processes have been executed and are finished.\nTotal child processes launched: %d\nTotal messages sent: %d\n", processesAmount, totalMessagesSent);
+	/* Print statistics and exit */
+	timesWrittenToLogs = 0;
+	printfConsoleAndFile("OSS: All child processes finished. Statistics:\n");
+	printfConsoleAndFile("Requests granted immediately: %d\nRequests granted after waiting: %d\n", stats.requestsGrantedImmediately, stats.requestsGrantedAfterWait);
+	printfConsoleAndFile("Processes terminated by deadlock recovery: %d\nProcesses terminated by self: %d\n", stats.processesTerminatedByDeadlock, stats.processesTerminatedBySelf);
+	float deadlockedAndTerminatedFromRecoveryPercent = stats.totalProcessesDeadlocked == 0 ? 0 : (float)stats.processesTerminatedByDeadlock / (float)stats.totalProcessesDeadlocked * 100;
+	printfConsoleAndFile("Deadlock detection runs: %d\nPercent of processes that were deadlocked and terminated from deadlock recovery: %.2f%\n", stats.deadlockDetectionRuns, deadlockedAndTerminatedFromRecoveryPercent);
+
 	cleanUpSharedMemory();
 	closeLogFileIfOpen();
 	return EXIT_SUCCESS;
