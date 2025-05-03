@@ -16,6 +16,12 @@ using namespace std;
 
 #define SHMKEY 9021011
 #define BUFFER_SIZE sizeof(int) * 2
+
+/*
+	Verbose parameter. Set to true for more detailed logs.
+*/
+const bool VERBOSE_LOGS_ENABLED = true;
+
 const int PROCESS_TABLE_MAX_SIZE = 18;
 const int GRANT_RESOURCE_MESSAGE_VALUE = RESOURCE_TYPES_AMOUNT * 2;
 
@@ -100,6 +106,18 @@ void printfConsoleAndFile(const char* baseString, ...) {
 	vfprintf(logFile, baseString, args);
 	va_end(args);
 	fflush(logFile);
+}
+
+/* Wrapper for printfConsoleAndFile() that returns early if verbose is not enabled */
+void printfConsoleAndFileVerbose(const char* baseString, ...) {
+	if (!VERBOSE_LOGS_ENABLED) {
+		return;
+	}
+
+	va_list args;
+	va_start(args, baseString);
+	printfConsoleAndFile(baseString, args);
+	va_end(args);
 }
 
 /* Detaches pointer and clears shared memory at the key */
@@ -336,7 +354,7 @@ int main(int argc, char** argv) {
 
 			/* Printing PCB table */
 			if (hasTimePassed(sharedClock[0], sharedClock[1], pcbTimerSeconds, pcbTimerNano)) {
-				addToClock(pcbTimerSeconds, pcbTimerNano, 10, ONE_BILLION / 2);
+				addToClock(pcbTimerSeconds, pcbTimerNano, 0, ONE_BILLION / 2);
 				printfConsoleAndFile("Process table:\n\tR0\tR1\tR2\tR3\tR4\n");
 				for (int i = 0; i < maxSimultaneousProcesses; i++) {
 					const char* isOccupied = processTable[i].occupied ? "true" : "false";
@@ -393,11 +411,17 @@ int main(int argc, char** argv) {
 
 				/* Terminate */
 				if (messageReceived.value == -1) {
-					printfConsoleAndFile("OSS: worker %d (PID %d) will terminate\n", i, processTable[i].pid);
+					printfConsoleAndFile("OSS: worker %d (PID %d) will terminate - Resources released: ", i, processTable[i].pid);
 					/* Discard messages */
 					MessageBuffer temp;
 					while (msgrcv(messageQueueId, &temp, sizeof(MessageBuffer) - sizeof(long), processTable[i].pid, IPC_NOWAIT) != -1) {
 					}
+					for (int j = 0; j < RESOURCE_TYPES_AMOUNT; j++) {
+						if (resources[j].allocated[i] > 0) {
+							printfConsoleAndFile("R%d:%d  ", j, resources[j].allocated[i]);
+						}
+					}
+					printfConsoleAndFile("\n");
 					freeProcess(resources, i);
 					removePidFromProcessTable(processTable[i].pid);
 					instancesRunning--;
@@ -417,7 +441,6 @@ int main(int argc, char** argv) {
 							handleFailsafeSignal(1);
 							exit(1);
 						}
-						printfConsoleAndFile("OSS: R%d available resources: %d\n", messageReceived.value, resources[messageReceived.value].availableInstances);
 					}
 					/* Unable to request resource */
 					else {
@@ -446,7 +469,13 @@ int main(int argc, char** argv) {
 						}
 					}
 				}
-				printfConsoleAndFile("\nTerminating worker %d\n", processIndexToKill);
+				printfConsoleAndFile("\nOSS: Terminating worker %d - Resources released: ", processIndexToKill);
+				for (int i = 0; i < RESOURCE_TYPES_AMOUNT; i++) {
+					if (resources[i].allocated[processIndexToKill] > 0) {
+						printfConsoleAndFile("R%d:%d  ", i, resources[i].allocated[processIndexToKill]);
+					}
+				}
+				printfConsoleAndFile("\n");
 				kill(processTable[processIndexToKill].pid, SIGKILL);
 				/* Discard messages */
 				MessageBuffer temp;

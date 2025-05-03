@@ -153,8 +153,6 @@ int main(int argc, char** argv) {
 		MessageBuffer messageToSend;
 		messageToSend.messageType = getpid();
 		/* Request a resource*/
-		printf("R0: %d R1: %d R2: %d R3: %d R4: %d\n", allocatedResources[0], allocatedResources[1], allocatedResources[2], allocatedResources[3], allocatedResources[4]);
-
 		if (decisionCode == 0) {
 			/* Send message back to parent to request resource */
 			messageToSend.value = resourceIndex;
