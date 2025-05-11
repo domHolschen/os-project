@@ -11,7 +11,6 @@
 #include<sys/msg.h>
 #include<stdarg.h>
 #include "clockUtils.h"
-#include "resourceUtils.h"
 using namespace std;
 
 #define SHMKEY 9021011
@@ -24,7 +23,6 @@ const bool VERBOSE_LOGS_ENABLED = true;
 int timesWrittenToLogs = 0;
 
 const int PROCESS_TABLE_MAX_SIZE = 18;
-const int GRANT_RESOURCE_MESSAGE_VALUE = RESOURCE_TYPES_AMOUNT * 2;
 
 struct PCB {
 	bool occupied; // either true or false
@@ -32,7 +30,6 @@ struct PCB {
 	int startSeconds; // time when it was forked
 	int startNano; // time when it was forked
 	bool blocked; // if the process is blocked by an unfulfilled request
-	bool wasProcessEverDeadlocked; // used for gathering stats
 };
 struct PCB processTable[PROCESS_TABLE_MAX_SIZE];
 struct MessageBuffer {
@@ -43,16 +40,6 @@ int sharedMemoryId;
 int* sharedClock;
 int messageQueueId;
 FILE* logFile = NULL;
-
-/* Stores stats on OSS run */
-struct Statistics {
-	int requestsGrantedImmediately = 0;
-	int requestsGrantedAfterWait = 0;
-	int processesTerminatedByDeadlock = 0;
-	int processesTerminatedBySelf = 0;
-	int deadlockDetectionRuns = 0;
-	int totalProcessesDeadlocked = 0;
-};
 
 void printHelp() {
 	printf("Usage: oss [-h] [-n proc] [-s simul] [-i interval] [-f logfile]\n");
@@ -173,57 +160,6 @@ void handleFailsafeSignal(int signal) {
 	exit(1);
 }
 
-/* Part of the provided deadlock detection algorithm*/
-bool req_lt_avail(const int* req, const int* avail, const int pnum, const int num_res) {
-	int i(0);
-	for (; i < num_res; i++)
-		if (req[pnum * num_res + i] > avail[i])
-			break;
-	return (i == num_res);
-}
-
-/* Deadlock detection function provided from professor but modified */
-bool deadlock(const int n, Descriptor* resources, bool* finish) {
-	/* Transforms data into a format that works with the provided code */
-	const int m = RESOURCE_TYPES_AMOUNT;
-	int request[n * RESOURCE_TYPES_AMOUNT];
-	int allocated[n * RESOURCE_TYPES_AMOUNT];
-	for (int i = 0; i < n; i++) {
-		for (int j = 0; j < RESOURCE_TYPES_AMOUNT; j++) {
-			request[i * RESOURCE_TYPES_AMOUNT + j] = resources[j].requested[i];
-			allocated[i * RESOURCE_TYPES_AMOUNT + j] = resources[j].allocated[i];
-		}
-	}
-	int available[RESOURCE_TYPES_AMOUNT];
-	for (int i = 0; i < RESOURCE_TYPES_AMOUNT; i++) {
-		available[i] = resources[i].availableInstances;
-	}
-
-	int work[m]; // m resources
-	for (int i = 0; i < m; i++) {
-		work[i] = available[i];
-	}
-	for (int i =  0; i < n; finish[i++] = false);
-
-	int p;
-	for (p = 0; p < n; p++) {
-		if (finish[p]) continue;
-		if (req_lt_avail(request, work, p, m)) {
-			finish[p] = true;
-			for (int i = 0; i < m; i++)
-				work[i] += allocated[p * m + i];
-			p = -1;
-		}
-	}
-
-	for (p = 0; p < n; p++) {
-		if (!finish[p]) {
-			return true;
-		}
-	}
-	return false;
-}
-
 int main(int argc, char** argv) {
 	const char optstr[] = "hn:s:i:f:";
 	char opt;
@@ -318,16 +254,6 @@ int main(int argc, char** argv) {
 	int intervalSeconds = forkIntervalMs / 1000;
 	int intervalNano = (forkIntervalMs % 1000) * 1000000;
 
-	/* Used for deadlock detection interval */
-	int nextDeadlockDetectionSecond = 1;
-
-	/* Create resources structure */
-	array<Descriptor, RESOURCE_TYPES_AMOUNT> resourcesArray = createResources();
-	Descriptor* resources = resourcesArray.data();
-
-	/* Set up statistics */
-	Statistics stats = {};
-
 	/* Set up failsafe that kills the program and its children after 60 seconds */
 	signal(SIGALRM, handleFailsafeSignal);
 	alarm(5);
@@ -380,165 +306,12 @@ int main(int argc, char** argv) {
 			/* Printing PCB table */
 			if (hasTimePassed(sharedClock[0], sharedClock[1], pcbTimerSeconds, pcbTimerNano)) {
 				addToClock(pcbTimerSeconds, pcbTimerNano, 0, ONE_BILLION / 2);
-				printfConsoleAndFile("Process table:\n\tR0\tR1\tR2\tR3\tR4\n");
-				for (int i = 0; i < maxSimultaneousProcesses; i++) {
-					printfConsoleAndFile("P%d\t%d\t%d\t%d\t%d\t%d\n", i, resources[0].allocated[i], resources[1].allocated[i], resources[2].allocated[i], resources[3].allocated[i], resources[4].allocated[i]);
-				}
-			}
-			
-			/* First looks at blocked processes */
-			for (int i = 0; i < MAX_PROCESSES_AMOUNT; i++) {
-				if (!processTable[i].occupied || !processTable[i].blocked) {
-					continue;
-				}
-				
-				for (int j = 0; j < RESOURCE_TYPES_AMOUNT; j++) {
-					if (resources[j].requested[i] > 0 && resources[j].availableInstances > 0) {
-						printfConsoleAndFile("OSS: blocked worker %d (PID %d) requested resource %d and is granted\n", i, processTable[i].pid, j);
-						long processPidToMessage = processTable[i].pid;
-						MessageBuffer messageToSend;
-						messageToSend.messageType = processPidToMessage + 1000000;
-						messageToSend.value = 1;
-						if (msgsnd(messageQueueId, &messageToSend, sizeof(MessageBuffer) - sizeof(long), 0) == -1) {
-							perror("OSS: Fatal error, msgsnd to child failed, terminating...\n");
-							printf("errno: %d\n", errno);
-							cleanUpSharedMemory();
-							closeLogFileIfOpen();
-							msgctl(messageQueueId, IPC_RMID, NULL);
-							exit(1);
-						}
-						processTable[i].blocked = false;
-						resources[j].requested[i]--;
-						allocateToProcess(resources[j], i);
-						stats.requestsGrantedAfterWait++;
-					}
-				}
-			}
-
-			/* Finds process to message, then sends message */
-			for (int i = 0; i < MAX_PROCESSES_AMOUNT; i++) {
-				if (!processTable[i].occupied || processTable[i].blocked) {
-					continue;
-				}
-				MessageBuffer messageReceived;
-				if (msgrcv(messageQueueId, &messageReceived, sizeof(MessageBuffer) - sizeof(long), processTable[i].pid, IPC_NOWAIT) == -1) {
-					/* No message received - skip remaining code in loop and go to next iteration */
-					if (errno == ENOMSG) {
-						continue;
-					}
-					else {
-						perror("OSS: Fatal error, msgrcv from child failed, terminating...\n");
-						handleFailsafeSignal(1);
-						exit(1);
-					}
-				}
-
-				/* Terminate */
-				if (messageReceived.value == -1) {
-					printfConsoleAndFileVerbose("OSS: worker %d (PID %d) will terminate - Resources released: ", i, processTable[i].pid);
-					/* Discard messages */
-					MessageBuffer temp;
-					while (msgrcv(messageQueueId, &temp, sizeof(MessageBuffer) - sizeof(long), processTable[i].pid, IPC_NOWAIT) != -1) {
-					}
-					for (int j = 0; j < RESOURCE_TYPES_AMOUNT; j++) {
-						if (resources[j].allocated[i] > 0) {
-							printfConsoleAndFileVerbose("R%d:%d  ", j, resources[j].allocated[i]);
-						}
-					}
-					printfConsoleAndFileVerbose("\n");
-					freeProcess(resources, i);
-					if (processTable[i].wasProcessEverDeadlocked) {
-						stats.totalProcessesDeadlocked++;
-					}
-					removePidFromProcessTable(processTable[i].pid);
-					instancesRunning--;
-					stats.processesTerminatedBySelf++;
-				}
-				/* Request */
-				else if (messageReceived.value < RESOURCE_TYPES_AMOUNT) {
-					bool successful = allocateToProcess(resources[messageReceived.value], i);
-					if (successful) {
-						printfConsoleAndFile("OSS: worker %d (PID %d) requested resource %d and is granted\n", i, processTable[i].pid, messageReceived.value);
-						long processPidToMessage = processTable[i].pid;
-						MessageBuffer messageToSend;
-						messageToSend.messageType = processPidToMessage + 1000000;
-						messageToSend.value = GRANT_RESOURCE_MESSAGE_VALUE;
-						if (msgsnd(messageQueueId, &messageToSend, sizeof(MessageBuffer) - sizeof(long), 0) == -1) {
-							perror("OSS: Fatal error, msgsnd to child failed, terminating...\n");
-							printf("errno: %d\n", errno);
-							handleFailsafeSignal(1);
-							exit(1);
-						}
-						stats.requestsGrantedImmediately++;
-					}
-					/* Unable to request resource */
-					else {
-						printfConsoleAndFile("OSS: worker %d (PID %d) requested resource %d but not available, blocking...\n", i, processTable[i].pid, messageReceived.value);
-						printfConsoleAndFileVerbose("OSS: Child blocked at time %d:%d\n", sharedClock[0], sharedClock[1]);
-						resources[messageReceived.value].requested[i]++;
-						processTable[i].blocked = true;
-					}
-				}
-				/* Free - freeing should always be successful when received by oss */
-				else if (messageReceived.value < GRANT_RESOURCE_MESSAGE_VALUE) {
-					int resourceId = messageReceived.value - RESOURCE_TYPES_AMOUNT;
-					printfConsoleAndFileVerbose("OSS: worker %d (PID %d) is freeing an instance of its resource %d\n", i, processTable[i].pid, resourceId);
-					freeFromProcess(resources[resourceId],i);
-				}
-			}
-
-			/* Deadlock detection */
-			if (sharedClock[0] > nextDeadlockDetectionSecond) {
-				nextDeadlockDetectionSecond = sharedClock[0];
-				stats.deadlockDetectionRuns++;
-				printfConsoleAndFile("OSS: Running deadlock detection...\n");
-				bool finish[maxSimultaneousProcesses];
-				if (deadlock(maxSimultaneousProcesses, resources, finish)) {
-					/* Determine which process to kill */
-					int processIndexToKill = -1;
-					printfConsoleAndFile("OSS: Deadlock detected! The following processes are in deadlock:\n");
-					for (int i = 0; i < maxSimultaneousProcesses; i++) {
-						if (!finish[i]) {
-							printfConsoleAndFile("P%d ", i);
-							if (processIndexToKill == -1) {
-								processIndexToKill = i;
-							}
-							processTable[i].wasProcessEverDeadlocked = true;
-						}
-					}
-					/* Kill process and free its resources */
-					printfConsoleAndFile("\nOSS: Terminating worker %d - Resources released: ", processIndexToKill);
-					for (int i = 0; i < RESOURCE_TYPES_AMOUNT; i++) {
-						if (resources[i].allocated[processIndexToKill] > 0) {
-							printfConsoleAndFile("R%d:%d  ", i, resources[i].allocated[processIndexToKill]);
-						}
-					}
-					printfConsoleAndFile("\n");
-					kill(processTable[processIndexToKill].pid, SIGKILL);
-					/* Discard messages */
-					MessageBuffer temp;
-					while (msgrcv(messageQueueId, &temp, sizeof(MessageBuffer) - sizeof(long), processTable[processIndexToKill].pid, IPC_NOWAIT) != -1) {
-					}
-					freeProcess(resources, processIndexToKill);
-					removePidFromProcessTable(processTable[processIndexToKill].pid);
-					instancesRunning--;
-					stats.processesTerminatedByDeadlock++;
-					stats.totalProcessesDeadlocked++;
-				}
 			}
 			
 			/* Add 10 ms */
 			addToClock(sharedClock[0], sharedClock[1], 0, ONE_BILLION / 100);
 		}
 	}
-
-	/* Print statistics and exit */
-	timesWrittenToLogs = 0;
-	printfConsoleAndFile("OSS: All child processes finished. Statistics:\n");
-	printfConsoleAndFile("Requests granted immediately: %d\nRequests granted after waiting: %d\n", stats.requestsGrantedImmediately, stats.requestsGrantedAfterWait);
-	printfConsoleAndFile("Processes terminated by deadlock recovery: %d\nProcesses terminated by self: %d\n", stats.processesTerminatedByDeadlock, stats.processesTerminatedBySelf);
-	float deadlockedAndTerminatedFromRecoveryPercent = stats.totalProcessesDeadlocked == 0 ? 0 : (float)stats.processesTerminatedByDeadlock / (float)stats.totalProcessesDeadlocked * 100;
-	printfConsoleAndFile("Deadlock detection runs: %d\nPercent of processes that were deadlocked and terminated from deadlock recovery: %.2f%\n", stats.deadlockDetectionRuns, deadlockedAndTerminatedFromRecoveryPercent);
 
 	cleanUpSharedMemory();
 	closeLogFileIfOpen();

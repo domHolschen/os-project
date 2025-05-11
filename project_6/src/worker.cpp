@@ -8,7 +8,6 @@
 #include<sys/shm.h>
 #include<sys/msg.h>
 #include "clockUtils.h"
-#include "resourceUtils.h"
 using namespace std;
 
 #define SHMKEY 9021011
