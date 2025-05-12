@@ -23,23 +23,42 @@ const bool VERBOSE_LOGS_ENABLED = true;
 int timesWrittenToLogs = 0;
 
 const int PROCESS_TABLE_MAX_SIZE = 18;
-
+const int PAGES_PER_PROCESS = 32;
 struct PCB {
 	bool occupied; // either true or false
 	pid_t pid; // process id of this child
 	int startSeconds; // time when it was forked
 	int startNano; // time when it was forked
-	bool blocked; // if the process is blocked by an unfulfilled request
+	bool blocked = false;
+	int blockedAtSeconds = 0; // time when it was blockeds
+	int blockedAtNano = 0;
+	MessageBuffer requestDetails; // save message's details for when it gets blocked and it creates a new frame later
 };
 struct PCB processTable[PROCESS_TABLE_MAX_SIZE];
+
+const int FRAME_TABLE_SIZE = 256;
+struct Frame {
+	bool occupied; // either true or false
+	int processIndex; // entry in process table
+	int pageNumber;
+	bool hasDirtyBit;
+	int lastUsedSecond;
+	int lastUsedNano;
+};
+struct Frame frameTable[FRAME_TABLE_SIZE];
+
+const int PARENT_TO_CHILD_MSG_TYPE_OFFSET = 1000000;
 struct MessageBuffer {
 	long messageType;
 	int value;
+	int readWrite;
 };
 int sharedMemoryId;
 int* sharedClock;
 int messageQueueId;
 FILE* logFile = NULL;
+
+const int EVENT_WAIT_TIME_NANO = ONE_BILLION / 1000 * 14;
 
 void printHelp() {
 	printf("Usage: oss [-h] [-n proc] [-s simul] [-i interval] [-f logfile]\n");
@@ -67,13 +86,11 @@ int findUnoccupiedProcessTableIndex() {
 }
 
 /* Helper function for finding an entry in the process table with a specific PID and remove it */
-void removePidFromProcessTable(pid_t pid) {
-	for (int i = 0; i < PROCESS_TABLE_MAX_SIZE; i++) {
-		if (processTable[i].pid == pid && processTable[i].occupied) {
-			kill(processTable[i].pid, SIGTERM);
-			processTable[i] = { false, 0, 0, 0, false, false };
-			return;
-		}
+void removeIndexFromProcessTable(int index) {
+	if (processTable[index].pid == pid && processTable[index].occupied) {
+		kill(processTable[index].pid, SIGTERM);
+		processTable[index] = { false, 0, 0, 0, false, false };
+		return;
 	}
 }
 
@@ -86,6 +103,11 @@ int findNextProcessInTable(int currentIndex) {
 		}
 	}
 	return -1;
+}
+
+/* Sets an entry in the frame table to the default struct */
+void clearFrame(int index) {
+	frameTable[index] = { false, -1, -1, false, 0, 0 };
 }
 
 /* Acts as a printf statement that writes to both the console and a file if defined */
@@ -160,6 +182,16 @@ void handleFailsafeSignal(int signal) {
 	exit(1);
 }
 
+/* Helper function for finding an unoccupied slot in the frame table array. Returns -1 if all are occupied */
+int findUnoccupiedFrameTableIndex() {
+	for (int i = 0; i < FRAME_TABLE_SIZE; i++) {
+		if (!frameTable[i].occupied) {
+			return i;
+		}
+	}
+	return -1;
+}
+
 int main(int argc, char** argv) {
 	const char optstr[] = "hn:s:i:f:";
 	char opt;
@@ -227,6 +259,18 @@ int main(int argc, char** argv) {
 	}
 	int processIndexToMessage = 0;
 
+	/* Set up page table, init everything to -1 */
+	int pageTable[PROCESS_TABLE_MAX_SIZE][PAGES_PER_PROCESS];
+	for (int i = 0; i < PROCESS_TABLE_MAX_SIZE i++) {
+		for (int j = 0; j < PAGES_PER_PROCESS; j++) {
+			pageTable[i][j] = -1;
+		}
+	}
+
+	for (int i = 0; i < FRAME_TABLE_SIZE; i++) {
+		clearFrame(i);
+	}
+
 	/* Set up shared memory & attach */
 	sharedMemoryId = shmget(SHMKEY, BUFFER_SIZE, 0777 | IPC_CREAT);
 	if (sharedMemoryId == -1) {
@@ -261,6 +305,7 @@ int main(int argc, char** argv) {
 
 	int instancesRunning = 0;
 	int totalInstancesToLaunch = processesAmount;
+	int currentProcessIndex = 0;
 
 	while (totalInstancesToLaunch > 0 || instancesRunning > 0) {
 		pid_t childPid = -1;
@@ -307,7 +352,96 @@ int main(int argc, char** argv) {
 			if (hasTimePassed(sharedClock[0], sharedClock[1], pcbTimerSeconds, pcbTimerNano)) {
 				addToClock(pcbTimerSeconds, pcbTimerNano, 0, ONE_BILLION / 2);
 			}
-			
+
+			/* Checking all blocked processes to add a page */
+			for (int i = 0; i < maxSimultaneousProcesses; i++) {
+				PCB currentProcess = processTable[i];
+				if (currentProcess.occupied && currentProcess.blocked) {
+					int unblockSeconds = sharedClock[0];
+					int unblockNano = sharedClock[1];
+
+					addToClock(unblockSeconds, unblockNano, 0, EVENT_WAIT_TIME_NANO);
+
+					if (hasTimePassed(sharedClock[0], sharedClock[1], unblockSeconds, unblockNano)) {
+						currentProcess.blocked = false;
+						int pageRequested = currentProcess.requestDetails.value / 1024;
+						bool isRead = currentProcess.requestDetails.readWrite == 0;
+
+						int frameIndex = findUnoccupiedFrameTableIndex();
+						frameTable[frameIndex] = { true, i, pageRequested, !isRead, sharedClock[0], sharedClock[1] };
+					}
+				}
+			}
+
+			int processIndex = findNextProcessInTable(currentProcessIndex);
+			PCB currentProcess = processTable[processIndex];
+			if (currentProcess.occupied) {
+				MessageBuffer messageToSend;
+				messageToSend.messageType = currentProcess.pid + PARENT_TO_CHILD_MSG_TYPE_OFFSET;
+				messageToSend.value = 1;
+
+				if (msgsnd(messageQueueId, &messageToSend, sizeof(MessageBuffer) - sizeof(long), 0) == -1) {
+					perror("OSS: Fatal error, msgsnd to child failed, terminating...\n");
+					printf("errno: %d\n", errno);
+					handleFailsafeSignal(1);
+					exit(1);
+				}
+
+				MessageBuffer messageReceived;
+				int messageType = currentProcess.pid;
+				messageReceived.messageType = messageType;
+				if (msgrcv(messageQueueId, &messageReceived, sizeof(MessageBuffer) - sizeof(long), messageType, 0) == -1) {
+					perror("OSS: Fatal error, msgrcv from child failed, terminating...\n");
+					handleFailsafeSignal(1);
+					exit(1);
+				}
+				int memoryAddressRequested = messageReceived.value;
+				int pageRequested = memoryAddressRequested / 1024;
+				bool isRead = messageReceived.readWrite == 0;
+				bool isTerminate = messageReceived.readWrite == 2;
+				bool pagefault = pageTable[i][pageRequested] == -1;
+
+				/* Received message to terminate*/
+				if (isTerminate) {
+					removeIndexFromProcessTable(processIndex);
+					for (int i = 0; i < PAGES_PER_PROCESS; i++) {
+						int frameIndex = pageTable[processIndex][i];
+						if (frameIndex > -1) {
+							clearFrame(frameIndex);
+						}
+					}
+				} else {
+					/* Page requested not already in page table */
+					if (pagefault) {
+						currentProcess.blocked = true;
+						currentProcess.blockedAtSeconds = sharedClock[0];
+						currentProcess.blockedAtNano = sharedClock[1];
+						currentProcess.requestDetails = messageReceived;
+
+					/* Page requested is in table */
+					} else {
+						int frameIndex = pageTable[i][pageRequested];
+						Frame currentFrame = frameTable[frameIndex];
+						currentFrame.hasDirtyBit = currentFrame.hasDirtyBit || !isRead;
+						currentFrame.lastUsedSecond = sharedClock[0];
+						currentFrame.lastUsedNano = sharedClock[1];
+
+						/* Send message to allow child to proceed */
+						MessageBuffer messageToSend;
+						messageToSend.messageType = currentProcess.pid + PARENT_TO_CHILD_MSG_TYPE_OFFSET;
+						messageToSend.value = 1;
+
+						if (msgsnd(messageQueueId, &messageToSend, sizeof(MessageBuffer) - sizeof(long), 0) == -1) {
+							perror("OSS: Fatal error, msgsnd to child failed, terminating...\n");
+							printf("errno: %d\n", errno);
+							handleFailsafeSignal(1);
+							exit(1);
+						}
+					}
+				}
+			}
+
+
 			/* Add 10 ms */
 			addToClock(sharedClock[0], sharedClock[1], 0, ONE_BILLION / 100);
 		}

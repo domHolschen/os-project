@@ -13,9 +13,12 @@ using namespace std;
 #define SHMKEY 9021011
 #define BUFFER_SIZE sizeof(int) * 2
 
+const int PARENT_TO_CHILD_MSG_TYPE_OFFSET = 1000000;
+
 struct MessageBuffer {
 	long messageType;
 	int value;
+	int readWrite;
 };
 
 /* Function to verify whether the argument is not null, numeric, and at least 1 */
@@ -36,33 +39,21 @@ bool isValidArgument(const char* arg) {
 	return argAsInt > 0;
 }
 
-/* Returns an int based on what the process will do */
-int makeDecision(int resourceAllocatedAmount) {
-	int random = rand() % 200;
-	/* Terminate */
-	if (random == 0) {
-		return 2;
-	}
-	/* Free a resource if it is maxed out */
-	if (resourceAllocatedAmount >= RESOURCE_INSTANCES_AMOUNT) {
-		return 1;
-	}
-	/* Free a resource randomly, if able */
-	if (random <= 40 && resourceAllocatedAmount > 0) {
-		return 1;
-	}
-	/* Request a resource */
-	if (resourceAllocatedAmount < RESOURCE_INSTANCES_AMOUNT) {
-		return 0;
-	}
-	
-	/* Not intended to reach here. this is a failsafe and won't do anything */
-	return -1;
-}
-
 /* Prepared printf statement that displays clock & process details */
 void printProcessDetails(int simClockS, int simClockN, int termTimeS, int termTimeN) {
 	printf("WORKER: PID:%d PPID:%d Clock(s):%d Clock(ns):%d Terminate(s):%d Terminate(ns):%d\n", getpid(), getppid(), simClockS, simClockN, termTimeS, termTimeN);
+}
+
+/* Function to wait for a message from parent */
+void waitForMessage() {
+	MessageBuffer messageReceived;
+	int messageType = currentProcess.pid + PARENT_TO_CHILD_MSG_TYPE_OFFSET;
+	messageReceived.messageType = messageType;
+	if (msgrcv(messageQueueId, &messageReceived, sizeof(MessageBuffer) - sizeof(long), messageType, 0) == -1) {
+		perror("OSS: Fatal error, msgrcv from child failed, terminating...\n");
+		handleFailsafeSignal(1);
+		exit(1);
+	}
 }
 
 /* Main method, defines the terminal command */
@@ -110,11 +101,9 @@ int main(int argc, char** argv) {
 		exit(1);
 	}
 
-	int nextDecisionSeconds = 0;
-	int nextDecisionNano = nextDecisionIntervalNano;
 	bool willTerminate = false;
-	bool blocked = false;
-	int requestedResource = -1;
+	/* Performs 900-1100 refs before terminating */
+	int refsBeforeTermination = rand() % 900 + 200;
 
 	/* Adds simulated clock's time to the passed in duration to get the time to make a decision */
 	addToClock(nextDecisionSeconds, nextDecisionNano, sharedClock[0], sharedClock[1]);
@@ -122,78 +111,37 @@ int main(int argc, char** argv) {
 	printf("WORKER: Just starting...\n");
 
 	while (!willTerminate) {
-		if (blocked) {
-			MessageBuffer blockedMessageReceived;
-			if (msgrcv(messageQueueId, &blockedMessageReceived, sizeof(MessageBuffer) - sizeof(long), getpid(), IPC_NOWAIT) == -1) {
-				if (errno == ENOMSG) {
-					continue;
-				}
-				perror("OSS: Fatal error, msgsnd to parent failed, terminating...\n");
-				exit(1);
-			}
-			allocatedResources[requestedResource]++;
-			blocked = false;
-			continue;
-		}
-		int decisionCode = -1;
-		bool canRequestResource;
-		int resourceIndex;
-		if (hasTimePassed(sharedClock[0], sharedClock[1], nextDecisionSeconds, nextDecisionNano)) {
-			resourceIndex = rand() % 5;
-			decisionCode = makeDecision(allocatedResources[resourceIndex]);
-			nextDecisionSeconds = sharedClock[0];
-			nextDecisionNano = sharedClock[1];
-			addToClock(nextDecisionSeconds, nextDecisionNano, 0, nextDecisionIntervalNano);
-		}
-		else {
-			continue;
-		}
+		/* Wait for message from parent before proceeding */
+		waitForMessage();
+
+		/* 80% read, 20% write */
+		bool shouldRead = rand() % 5 > 0;
+
+		int pageNumber = rand() % 32;
+		int byteOffset = rand() % 1024;
 
 		MessageBuffer messageToSend;
 		messageToSend.messageType = getpid();
-		/* Request a resource*/
-		if (decisionCode == 0) {
-			/* Send message back to parent to request resource */
-			messageToSend.value = resourceIndex;
-			if (msgsnd(messageQueueId, &messageToSend, sizeof(MessageBuffer) - sizeof(long), 0) == -1) {
-				perror("OSS: Fatal error, msgsnd to parent failed, terminating...\n");
-				exit(1);
-			}
-
-			requestedResource = resourceIndex;
-			allocatedResources[resourceIndex]++;
-			blocked = true;
-
-			/* Wait to receive a message from oss that the resource was granted */
-			MessageBuffer messageReceived;
-			if (msgrcv(messageQueueId, &messageReceived, sizeof(MessageBuffer) - sizeof(long), getpid() + 1000000, 0) == -1) {
-				perror("OSS: Fatal error, msgsnd to parent failed, terminating...\n");
-				exit(1);
-			}
-			blocked = false;
-			requestedResource = -1;
-
-		}
-		/* Free a resource*/
-		if (decisionCode == 1) {
-			/* Send message back to parent to free resource */
-			messageToSend.value = resourceIndex + RESOURCE_TYPES_AMOUNT;
-			if (msgsnd(messageQueueId, &messageToSend, sizeof(MessageBuffer) - sizeof(long), 0) == -1) {
-				perror("OSS: Fatal error, msgsnd to parent failed, terminating...\n");
-				exit(1);
-			}
-			allocatedResources[resourceIndex]--;
-		}
-		/* Termination */
-		if (decisionCode == 2) {
-			/* Send message back to parent to terminate */
-			messageToSend.value = -1;
+		messageToSend.value = pageNumber * 1024 + byteOffset;
+		/* Message to terminate */
+		if (refsBeforeTermination <= 0) {
+			messageToSend.readWrite = 2;
 			willTerminate = true;
-			if (msgsnd(messageQueueId, &messageToSend, sizeof(MessageBuffer) - sizeof(long), 0) == -1) {
-				perror("OSS: Fatal error, msgsnd to parent failed, terminating...\n");
-				exit(1);
-			}
+			break;
 		}
+		else {
+			messageToSend.readWrite = shouldRead ? 0 : 1;
+		}
+
+		if (msgsnd(messageQueueId, &messageToSend, sizeof(MessageBuffer) - sizeof(long), 0) == -1) {
+			perror("OSS: Fatal error, msgsnd to parent failed, terminating...\n");
+			exit(1);
+		}
+
+		refsBeforeTermination--;
+
+		/* Wait for message from parent before doing anything */
+		waitForMessage();
 	}
 	shmdt(sharedClock);
 
