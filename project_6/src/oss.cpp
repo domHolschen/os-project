@@ -86,15 +86,6 @@ int findUnoccupiedProcessTableIndex() {
 	return -1;
 }
 
-/* Helper function for getting the last page written to */
-int findOldestProcessTableIndex() {
-	int index = 0;
-	for (int i = 1; i < PROCESS_TABLE_MAX_SIZE; i++) {
-
-	}
-	return index;
-}
-
 /* Helper function for finding an entry in the process table with a specific PID and remove it */
 void removeIndexFromProcessTable(int index) {
 	if (processTable[index].occupied) {
@@ -200,6 +191,21 @@ int findUnoccupiedFrameTableIndex() {
 		}
 	}
 	return -1;
+}
+
+/* Helper function for finding the least accessed slot in the frame table array. Returns -1 if all are occupied */
+int findLongestUnusedFrameTableIndex() {
+	int returnIndex = 0;
+	int lastUsedSecond = frameTable[0].lastUsedSecond;
+	int lastUsedNano = frameTable[0].lastUsedNano;
+	for (int i = 0; i < FRAME_TABLE_SIZE; i++) {
+		if (hasTimePassed(lastUsedSecond, lastUsedNano, frameTable[i].lastUsedSecond, frameTable[i].lastUsedNano)) {
+			returnIndex = i;
+			lastUsedSecond = frameTable[i].lastUsedSecond;
+			lastUsedNano = frameTable[i].lastUsedNano;
+		}
+	}
+	return returnIndex;
 }
 
 int main(int argc, char** argv) {
@@ -398,6 +404,11 @@ int main(int argc, char** argv) {
 						bool isRead = currentProcess.requestDetails.readWrite == 0;
 
 						int frameIndex = findUnoccupiedFrameTableIndex();
+						if (frameIndex == -1) {
+							frameIndex = findLongestUnusedFrameTableIndex();
+							printfConsoleAndFile("OSS: No unused frame in table, overwriting frame table slot %d\n", frameIndex);
+						}
+
 						frameTable[frameIndex] = { true, i, pageRequested, !isRead, sharedClock[0], sharedClock[1] };
 						pageTable[i][pageRequested] = frameIndex;
 
@@ -418,12 +429,10 @@ int main(int argc, char** argv) {
 
 			int processIndex = findNextProcessInTable(currentProcessIndex);
 			currentProcessIndex = processIndex;
-			printfConsoleAndFile("OSS: Looking at P%d\n", processIndex);
 
 			PCB currentProcess = processTable[processIndex];
 
 			if (currentProcess.occupied && !currentProcess.blocked) {
-				printfConsoleAndFile("OSS: Sending message to P%d\n", processIndex);
 				MessageBuffer messageToSend;
 				messageToSend.messageType = currentProcess.pid + PARENT_TO_CHILD_MSG_TYPE_OFFSET;
 				messageToSend.value = 1;
