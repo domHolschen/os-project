@@ -49,6 +49,11 @@ struct Frame {
 };
 struct Frame frameTable[FRAME_TABLE_SIZE];
 
+struct Stats {
+	int totalAccesses = 0;
+	int totalPagefaults = 0;
+};
+
 int sharedMemoryId;
 int* sharedClock;
 FILE* logFile = NULL;
@@ -180,6 +185,11 @@ int findLongestUnusedFrameTableIndex() {
 	return returnIndex;
 }
 
+/* Converts seconds + nano into a long representing seconds */
+float timerAsFloat(int seconds, int nano) {
+	return (float)seconds + ((float)nano / (float)ONE_BILLION);
+}
+
 int main(int argc, char** argv) {
 	const char optstr[] = "hn:s:i:f:";
 	char opt;
@@ -273,6 +283,8 @@ int main(int argc, char** argv) {
 	sharedClock[0] = 0;
 	/* Simulated clock: nanoseconds */
 	sharedClock[1] = 0;
+
+	Stats stats;
 
 	/* Keeps track of the half-second intervals where OSS will print the PCB table */
 	int pcbTimerSeconds = 0;
@@ -455,21 +467,25 @@ int main(int argc, char** argv) {
 				} else {
 					/* Page requested not already in page table */
 					if (pagefault) {
-						printfConsoleAndFile("OSS: P%d triggered pagefault, blocking...\n", processIndex);
+						printfConsoleAndFile("OSS: P%d requested address %d, pagefault, blocking...\n", processIndex, memoryAddressRequested);
 						processTable[processIndex].blocked = true;
 						processTable[processIndex].blockedAtSeconds = sharedClock[0];
 						processTable[processIndex].blockedAtNano = sharedClock[1];
 						processTable[processIndex].requestDetails = messageReceived;
+						addToClock(sharedClock[0], sharedClock[1], 0, 100);
+						stats.totalAccesses++;
+						stats.totalPagefaults++;
 
 					/* Page requested is in table */
 					} else {
-						printfConsoleAndFile("OSS: P%d requested page already in table\n", processIndex);
+						printfConsoleAndFile("OSS: P%d requested address %d, page already in table\n", processIndex, memoryAddressRequested);
 						int frameIndex = pageTable[processIndex][pageRequested];
 						frameTable[frameIndex].hasDirtyBit = frameTable[frameIndex].hasDirtyBit || !isRead;
 						frameTable[frameIndex].lastUsedSecond = sharedClock[0];
 						frameTable[frameIndex].lastUsedNano = sharedClock[1];
 
 						/* Send message to allow child to proceed */
+						printfConsoleAndFile("OSS: Sending message to P%d to allow it to continue\n", processIndex);
 						MessageBuffer messageToSend;
 						messageToSend.messageType = currentProcess.pid + PARENT_TO_CHILD_MSG_TYPE_OFFSET;
 						messageToSend.value = 1;
@@ -480,6 +496,8 @@ int main(int argc, char** argv) {
 							handleFailsafeSignal(1);
 							exit(1);
 						}
+
+						stats.totalAccesses++;
 					}
 				}
 			}
@@ -489,6 +507,9 @@ int main(int argc, char** argv) {
 		}
 	}
 	printfConsoleAndFile("OSS: Finished\n");
+	float accessesPerSecond = (float)stats.totalAccesses / timerAsFloat(sharedClock[0], sharedClock[1]);
+	float percentPagefaultOnAccess = (float)stats.totalPagefaults / (float)stats.totalAccesses * 100;
+	printfConsoleAndFile("OSS: Accesses per second: %.2f\nPercent a memory access would pagefault: %.2f%\n", accessesPerSecond, percentPagefaultOnAccess);
 
 	cleanUpSharedMemory();
 	closeLogFileIfOpen();
