@@ -20,6 +20,7 @@ struct MessageBuffer {
 	int value;
 	int readWrite;
 };
+int messageQueueId;
 
 /* Function to verify whether the argument is not null, numeric, and at least 1 */
 bool isValidArgument(const char* arg) {
@@ -47,11 +48,10 @@ void printProcessDetails(int simClockS, int simClockN, int termTimeS, int termTi
 /* Function to wait for a message from parent */
 void waitForMessage() {
 	MessageBuffer messageReceived;
-	int messageType = currentProcess.pid + PARENT_TO_CHILD_MSG_TYPE_OFFSET;
+	int messageType = getpid() + PARENT_TO_CHILD_MSG_TYPE_OFFSET;
 	messageReceived.messageType = messageType;
 	if (msgrcv(messageQueueId, &messageReceived, sizeof(MessageBuffer) - sizeof(long), messageType, 0) == -1) {
 		perror("OSS: Fatal error, msgrcv from child failed, terminating...\n");
-		handleFailsafeSignal(1);
 		exit(1);
 	}
 }
@@ -71,11 +71,7 @@ int main(int argc, char** argv) {
 		printf("WORKER: Invalid or missing interval argument, defaulting to 1 ms\n");
 	}
 
-	/* Set up resources */
-	int allocatedResources[RESOURCE_TYPES_AMOUNT] = { 0 };
-
 	/* Set up message queue */
-	int messageQueueId;
 	key_t key;
 	system("touch keyfile.txt");
 
@@ -105,9 +101,6 @@ int main(int argc, char** argv) {
 	/* Performs 900-1100 refs before terminating */
 	int refsBeforeTermination = rand() % 900 + 200;
 
-	/* Adds simulated clock's time to the passed in duration to get the time to make a decision */
-	addToClock(nextDecisionSeconds, nextDecisionNano, sharedClock[0], sharedClock[1]);
-
 	printf("WORKER: Just starting...\n");
 
 	while (!willTerminate) {
@@ -127,7 +120,6 @@ int main(int argc, char** argv) {
 		if (refsBeforeTermination <= 0) {
 			messageToSend.readWrite = 2;
 			willTerminate = true;
-			break;
 		}
 		else {
 			messageToSend.readWrite = shouldRead ? 0 : 1;

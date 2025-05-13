@@ -22,6 +22,14 @@ using namespace std;
 const bool VERBOSE_LOGS_ENABLED = true;
 int timesWrittenToLogs = 0;
 
+const int PARENT_TO_CHILD_MSG_TYPE_OFFSET = 1000000;
+struct MessageBuffer {
+	long messageType;
+	int value;
+	int readWrite;
+};
+int messageQueueId;
+
 const int PROCESS_TABLE_MAX_SIZE = 18;
 const int PAGES_PER_PROCESS = 32;
 struct PCB {
@@ -47,15 +55,8 @@ struct Frame {
 };
 struct Frame frameTable[FRAME_TABLE_SIZE];
 
-const int PARENT_TO_CHILD_MSG_TYPE_OFFSET = 1000000;
-struct MessageBuffer {
-	long messageType;
-	int value;
-	int readWrite;
-};
 int sharedMemoryId;
 int* sharedClock;
-int messageQueueId;
 FILE* logFile = NULL;
 
 const int EVENT_WAIT_TIME_NANO = ONE_BILLION / 1000 * 14;
@@ -85,9 +86,18 @@ int findUnoccupiedProcessTableIndex() {
 	return -1;
 }
 
+/* Helper function for getting the last page written to */
+int findOldestProcessTableIndex() {
+	int index = 0;
+	for (int i = 1; i < PROCESS_TABLE_MAX_SIZE; i++) {
+
+	}
+	return index;
+}
+
 /* Helper function for finding an entry in the process table with a specific PID and remove it */
 void removeIndexFromProcessTable(int index) {
-	if (processTable[index].pid == pid && processTable[index].occupied) {
+	if (processTable[index].occupied) {
 		kill(processTable[index].pid, SIGTERM);
 		processTable[index] = { false, 0, 0, 0, false, false };
 		return;
@@ -261,7 +271,7 @@ int main(int argc, char** argv) {
 
 	/* Set up page table, init everything to -1 */
 	int pageTable[PROCESS_TABLE_MAX_SIZE][PAGES_PER_PROCESS];
-	for (int i = 0; i < PROCESS_TABLE_MAX_SIZE i++) {
+	for (int i = 0; i < PROCESS_TABLE_MAX_SIZE; i++) {
 		for (int j = 0; j < PAGES_PER_PROCESS; j++) {
 			pageTable[i][j] = -1;
 		}
@@ -351,31 +361,69 @@ int main(int argc, char** argv) {
 			/* Printing PCB table */
 			if (hasTimePassed(sharedClock[0], sharedClock[1], pcbTimerSeconds, pcbTimerNano)) {
 				addToClock(pcbTimerSeconds, pcbTimerNano, 0, ONE_BILLION / 2);
+
+				/* Frame table */
+				printfConsoleAndFile("OSS: Current memory layout at time %d:%d is:\n\tOccupied?\tDirty?\tLastRef\n", sharedClock[0], sharedClock[1]);
+				for (int i = 0; i < FRAME_TABLE_SIZE; i++) {
+					const char* occupiedString = frameTable[i].occupied ? "true" : "false";
+					const char* dirtyString = frameTable[i].hasDirtyBit ? "true" : "false";
+
+					printfConsoleAndFile("F%d:\t%s\t\t%s\t%d:%d\n", i, occupiedString, dirtyString, frameTable[i].lastUsedSecond, frameTable[i].lastUsedNano);
+				}
+
+				/* Page table */
+				for (int i = 0; i < maxSimultaneousProcesses; i++) {
+					printfConsoleAndFile("P%d: [ ", i);
+					for (int j = 0; j < PAGES_PER_PROCESS; j++) {
+						printfConsoleAndFile("%d ", pageTable[i][j]);
+					}
+					printfConsoleAndFile("]\n");
+				}
 			}
 
 			/* Checking all blocked processes to add a page */
 			for (int i = 0; i < maxSimultaneousProcesses; i++) {
 				PCB currentProcess = processTable[i];
 				if (currentProcess.occupied && currentProcess.blocked) {
-					int unblockSeconds = sharedClock[0];
-					int unblockNano = sharedClock[1];
+					int unblockSeconds = currentProcess.blockedAtSeconds;
+					int unblockNano = currentProcess.blockedAtNano;
 
 					addToClock(unblockSeconds, unblockNano, 0, EVENT_WAIT_TIME_NANO);
 
 					if (hasTimePassed(sharedClock[0], sharedClock[1], unblockSeconds, unblockNano)) {
-						currentProcess.blocked = false;
+						printfConsoleAndFile("OSS: P%d is unblocked\n", i);
+
+						processTable[i].blocked = false;
 						int pageRequested = currentProcess.requestDetails.value / 1024;
 						bool isRead = currentProcess.requestDetails.readWrite == 0;
 
 						int frameIndex = findUnoccupiedFrameTableIndex();
 						frameTable[frameIndex] = { true, i, pageRequested, !isRead, sharedClock[0], sharedClock[1] };
+						pageTable[i][pageRequested] = frameIndex;
+
+						/* Send message to allow child to proceed */
+						MessageBuffer messageToSend;
+						messageToSend.messageType = currentProcess.pid + PARENT_TO_CHILD_MSG_TYPE_OFFSET;
+						messageToSend.value = 1;
+
+						if (msgsnd(messageQueueId, &messageToSend, sizeof(MessageBuffer) - sizeof(long), 0) == -1) {
+							perror("OSS: Fatal error, msgsnd to child failed, terminating...\n");
+							printf("errno: %d\n", errno);
+							handleFailsafeSignal(1);
+							exit(1);
+						}
 					}
 				}
 			}
 
 			int processIndex = findNextProcessInTable(currentProcessIndex);
+			currentProcessIndex = processIndex;
+			printfConsoleAndFile("OSS: Looking at P%d\n", processIndex);
+
 			PCB currentProcess = processTable[processIndex];
-			if (currentProcess.occupied) {
+
+			if (currentProcess.occupied && !currentProcess.blocked) {
+				printfConsoleAndFile("OSS: Sending message to P%d\n", processIndex);
 				MessageBuffer messageToSend;
 				messageToSend.messageType = currentProcess.pid + PARENT_TO_CHILD_MSG_TYPE_OFFSET;
 				messageToSend.value = 1;
@@ -399,32 +447,36 @@ int main(int argc, char** argv) {
 				int pageRequested = memoryAddressRequested / 1024;
 				bool isRead = messageReceived.readWrite == 0;
 				bool isTerminate = messageReceived.readWrite == 2;
-				bool pagefault = pageTable[i][pageRequested] == -1;
+				bool pagefault = pageTable[processIndex][pageRequested] == -1;
 
 				/* Received message to terminate*/
 				if (isTerminate) {
+					printfConsoleAndFile("OSS: P%d is planning to terminate\n", processIndex);
 					removeIndexFromProcessTable(processIndex);
 					for (int i = 0; i < PAGES_PER_PROCESS; i++) {
 						int frameIndex = pageTable[processIndex][i];
 						if (frameIndex > -1) {
 							clearFrame(frameIndex);
 						}
+						pageTable[processIndex][i] = -1;
 					}
+					instancesRunning--;
 				} else {
 					/* Page requested not already in page table */
 					if (pagefault) {
-						currentProcess.blocked = true;
-						currentProcess.blockedAtSeconds = sharedClock[0];
-						currentProcess.blockedAtNano = sharedClock[1];
-						currentProcess.requestDetails = messageReceived;
+						printfConsoleAndFile("OSS: P%d triggered pagefault, blocking...\n", processIndex);
+						processTable[processIndex].blocked = true;
+						processTable[processIndex].blockedAtSeconds = sharedClock[0];
+						processTable[processIndex].blockedAtNano = sharedClock[1];
+						processTable[processIndex].requestDetails = messageReceived;
 
 					/* Page requested is in table */
 					} else {
-						int frameIndex = pageTable[i][pageRequested];
-						Frame currentFrame = frameTable[frameIndex];
-						currentFrame.hasDirtyBit = currentFrame.hasDirtyBit || !isRead;
-						currentFrame.lastUsedSecond = sharedClock[0];
-						currentFrame.lastUsedNano = sharedClock[1];
+						printfConsoleAndFile("OSS: P%d requested page already in table\n", processIndex);
+						int frameIndex = pageTable[processIndex][pageRequested];
+						frameTable[frameIndex].hasDirtyBit = frameTable[frameIndex].hasDirtyBit || !isRead;
+						frameTable[frameIndex].lastUsedSecond = sharedClock[0];
+						frameTable[frameIndex].lastUsedNano = sharedClock[1];
 
 						/* Send message to allow child to proceed */
 						MessageBuffer messageToSend;
@@ -441,11 +493,11 @@ int main(int argc, char** argv) {
 				}
 			}
 
-
 			/* Add 10 ms */
 			addToClock(sharedClock[0], sharedClock[1], 0, ONE_BILLION / 100);
 		}
 	}
+	printfConsoleAndFile("OSS: Finished\n");
 
 	cleanUpSharedMemory();
 	closeLogFileIfOpen();
