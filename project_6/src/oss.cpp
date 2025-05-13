@@ -16,12 +16,6 @@ using namespace std;
 #define SHMKEY 9021011
 #define BUFFER_SIZE sizeof(int) * 2
 
-/*
-	Verbose parameter. Set to true for more detailed logs.
-*/
-const bool VERBOSE_LOGS_ENABLED = true;
-int timesWrittenToLogs = 0;
-
 const int PARENT_TO_CHILD_MSG_TYPE_OFFSET = 1000000;
 struct MessageBuffer {
 	long messageType;
@@ -111,43 +105,21 @@ void clearFrame(int index) {
 	frameTable[index] = { false, -1, -1, false, 0, 0 };
 }
 
-/* Acts as a printf statement that writes to both the console and a file if defined */
-void vprintfConsoleAndFile(const char* baseString, va_list args) {
-	const int MAX_LOGS_AMOUNT = 100000;
-	if (timesWrittenToLogs >= MAX_LOGS_AMOUNT) {
-		return;
-	}
-	timesWrittenToLogs++;
-
-	vprintf(baseString, args);
-
-	if (logFile != NULL) {
-		va_list argsCopy;
-		va_copy(argsCopy, args);
-		vfprintf(logFile, baseString, argsCopy);
-		va_end(argsCopy);
-		fflush(logFile);
-	}
-}
-
 /* Wrapper for vprintfConsoleAndFile() that prints regardless of verbose flag */
 void printfConsoleAndFile(const char* baseString, ...) {
-	va_list args;
-	va_start(args, baseString);
-	vprintfConsoleAndFile(baseString, args);
-	va_end(args);
-}
+	va_list argsConsole;
+	va_list argsFile;
 
-/* Wrapper for vprintfConsoleAndFile() that returns early if verbose is not enabled */
-void printfConsoleAndFileVerbose(const char* baseString, ...) {
-	if (!VERBOSE_LOGS_ENABLED) {
-		return;
+	va_start(argsConsole, baseString);
+	va_copy(argsFile, argsConsole);
+	vprintf(baseString, argsConsole);
+	va_end(argsConsole);
+
+	if (logFile != NULL) {
+		vfprintf(logFile, baseString, argsFile);
+		fflush(logFile);
 	}
-
-	va_list args;
-	va_start(args, baseString);
-	vprintfConsoleAndFile(baseString, args);
-	va_end(args);
+	va_end(argsFile);
 }
 
 /* Detaches pointer and clears shared memory at the key */
@@ -343,6 +315,11 @@ int main(int argc, char** argv) {
 			}
 
 			childPid = fork();
+			if (childPid < 0) {
+				perror("OSS: Fork failed, terminating\n");
+				handleFailsafeSignal(1);
+				exit(1);
+			}
 		}
 
 		/* Child process - launches worker */
@@ -351,6 +328,7 @@ int main(int argc, char** argv) {
 			string arg1 = to_string(rand() % 1000);
 			execlp(arg0.c_str(), arg0.c_str(), arg1.c_str(), (char*)0);
 			perror("OSS: Launching worker failed, terminating\n");
+			handleFailsafeSignal(1);
 			exit(1);
 			/* Parent process - waits for children to terminate */
 		} else {
@@ -374,7 +352,11 @@ int main(int argc, char** argv) {
 					const char* occupiedString = frameTable[i].occupied ? "true" : "false";
 					const char* dirtyString = frameTable[i].hasDirtyBit ? "true" : "false";
 
-					printfConsoleAndFile("F%d:\t%s\t\t%s\t%d:%d\n", i, occupiedString, dirtyString, frameTable[i].lastUsedSecond, frameTable[i].lastUsedNano);
+					if (frameTable[i].occupied) {
+						printfConsoleAndFile("F%d:\t%s\t\t%s\t%d:%d\n", i, occupiedString, dirtyString, frameTable[i].lastUsedSecond, frameTable[i].lastUsedNano);
+					} else {
+						printfConsoleAndFile("F%d:\t%s\t\t%s\tN/A\n", i, occupiedString, dirtyString);
+					}
 				}
 
 				/* Page table */
